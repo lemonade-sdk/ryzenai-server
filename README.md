@@ -30,7 +30,7 @@ This server enables running Large Language Models on AMD Ryzen AI 300-series pro
   - Download from: https://ryzenai.docs.amd.com
 
 **Hardware Requirements:**
-- AMD Ryzen AI 300-series processor (for NPU execution)
+- AMD Ryzen AI 300- or 400-series processor (for NPU execution)
 - Minimum 16GB RAM (32GB recommended for larger models)
 
 ### Build Steps
@@ -322,8 +322,10 @@ build\bin\Debug\ryzenai-server.exe
 
 ## License
 
-This project's source code is licensed under the Apache 2.0 License.
+This project's **source code** is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.
 
-**Third-Party Dependencies:**
-- **cpp-httplib** and **nlohmann/json** use MIT licenses
-- **Ryzen AI DLLs** (included in binary releases) are licensed under the AMD Software End User License Agreement - see `AMD_LICENSE` file in the release package for full terms
+**Release Artifacts (ryzenai-server.zip):**
+- The `ryzenai-server.exe` binary and the header-only dependencies (**cpp-httplib**, **nlohmann/json**) are MIT licensed
+- The **Ryzen AI DLLs** included in binary releases are licensed under the AMD Software End User License Agreement - see `AMD_LICENSE` file in the release package for full terms
+
+**Note:** When you download a release, the `AMD_LICENSE` file is included alongside the DLLs. The source code in this repository does not include the DLLs - they are copied from your local Ryzen AI installation during the build process.

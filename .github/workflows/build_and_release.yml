@@ -3,6 +3,8 @@ name: Build and Release RyzenAI Server
 on:
   push:
     branches: ["main"]
+    tags:
+      - v*
     paths:
       - '**.cpp'
       - '**.h'
@@ -15,12 +17,6 @@ on:
       - 'CMakeLists.txt'
       - '.github/workflows/**'
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: 'Create a GitHub release with the built artifacts'
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -149,7 +145,7 @@ jobs:
     name: Create GitHub Release
     needs: build-ryzenai-server
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true'))
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
         with:
