@@ -1,0 +1,209 @@
+name: Build and Release RyzenAI Server
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - 'CMakeLists.txt'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - 'CMakeLists.txt'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub release with the built artifacts'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-ryzenai-server:
+    name: Build RyzenAI Server
+    runs-on: [rai-160-sdk, Windows]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 0
+
+      - name: Install CMake if not available
+        shell: PowerShell
+        run: |
+          # Check if CMake is already installed
+          $cmakeInstalled = Get-Command cmake -ErrorAction SilentlyContinue
+          
+          if (-not $cmakeInstalled) {
+              Write-Host "CMake not found, installing..." -ForegroundColor Yellow
+              
+              # Download CMake installer
+              $cmakeVersion = "3.28.1"
+              $cmakeUrl = "https://github.com/Kitware/CMake/releases/download/v$cmakeVersion/cmake-$cmakeVersion-windows-x86_64.msi"
+              $cmakeInstaller = "cmake-installer.msi"
+              
+              Invoke-WebRequest -Uri $cmakeUrl -OutFile $cmakeInstaller
+              
+              # Install CMake silently
+              Start-Process msiexec.exe -ArgumentList "/i $cmakeInstaller /quiet /norestart" -Wait
+              
+              # Add CMake to PATH for this session AND future steps
+              $cmakePath = "C:\Program Files\CMake\bin"
+              $env:PATH = "$cmakePath;$env:PATH"
+              
+              # Persist to GITHUB_PATH for future steps
+              echo $cmakePath >> $env:GITHUB_PATH
+              
+              # Verify installation
+              cmake --version
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Host "ERROR: CMake installation failed!" -ForegroundColor Red
+                  exit 1
+              }
+              
+              Write-Host "CMake installed successfully and added to PATH!" -ForegroundColor Green
+          } else {
+              Write-Host "CMake is already installed:" -ForegroundColor Green
+              cmake --version
+          }
+
+      - name: Build RyzenAI Server with CMake
+        shell: PowerShell
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          Write-Host "Building ryzenai-server..." -ForegroundColor Cyan
+          
+          # Create build directory
+          if (Test-Path "build") {
+              Remove-Item -Recurse -Force "build"
+          }
+          mkdir build
+          cd build
+          
+          # Configure - Ryzen AI should be at C:\Program Files\RyzenAI\1.6.0
+          cmake .. -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { 
+              Write-Host "ERROR: CMake configuration failed!" -ForegroundColor Red
+              exit $LASTEXITCODE 
+          }
+          
+          # Build
+          cmake --build . --config Release
+          if ($LASTEXITCODE -ne 0) { 
+              Write-Host "ERROR: Build failed!" -ForegroundColor Red
+              exit $LASTEXITCODE 
+          }
+          
+          # Verify binary exists
+          if (-not (Test-Path "bin\Release\ryzenai-server.exe")) {
+              Write-Host "ERROR: ryzenai-server.exe not found!" -ForegroundColor Red
+              exit 1
+          }
+          
+          Write-Host "ryzenai-server build successful!" -ForegroundColor Green
+
+      - name: Verify RyzenAI Server build
+        shell: PowerShell
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          $releaseDir = "build\bin\Release"
+          
+          Write-Host "Verifying ryzenai-server build output..." -ForegroundColor Cyan
+          
+          if (-not (Test-Path "$releaseDir\ryzenai-server.exe")) {
+              Write-Host "ERROR: ryzenai-server.exe not found in $releaseDir" -ForegroundColor Red
+              exit 1
+          }
+          
+          Write-Host "`nListing all files that will be uploaded:" -ForegroundColor Cyan
+          Get-ChildItem $releaseDir -File | ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "  - $($_.Name) ($sizeMB MB)" -ForegroundColor Gray
+          }
+          
+          $fileCount = (Get-ChildItem $releaseDir -File | Measure-Object).Count
+          Write-Host "`nFound $fileCount files in release directory" -ForegroundColor Green
+          Write-Host "Contents will be uploaded as artifact (GitHub will zip automatically)" -ForegroundColor Gray
+
+      - name: Upload RyzenAI Server Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryzenai-server
+          path: |
+            build/bin/Release/*.exe
+            build/bin/Release/*.dll
+            build/bin/Release/*.pdb
+            build/bin/Release/AMD_LICENSE
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-ryzenai-server
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true'))
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from CMakeLists.txt
+        id: get_version
+        run: |
+          VERSION=$(grep -oP 'project\(ryzenai-server VERSION \K[0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ryzenai-server
+          path: ryzenai-server-files
+
+      - name: Create ryzenai-server.zip for release
+        run: |
+          cd ryzenai-server-files
+          zip -r ../ryzenai-server.zip *
+          cd ..
+          ls -lh ryzenai-server.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: RyzenAI Server v${{ steps.get_version.outputs.version }}
+          body: |
+            ## RyzenAI Server v${{ steps.get_version.outputs.version }}
+            
+            OpenAI API-compatible server for running LLMs on AMD Ryzen AI NPUs.
+            
+            ### Installation
+            
+            Download `ryzenai-server.zip` and extract to your preferred location.
+            
+            ### Requirements
+            
+            - Windows 11 (64-bit)
+            - AMD Ryzen AI 300-series processor
+            - Ryzen AI Software 1.6.0 with LLM patch
+            
+            ### Usage
+            
+            ```cmd
+            ryzenai-server.exe -m C:\path\to\onnx\model --mode hybrid
+            ```
+            
+            See the [README](https://github.com/lemonade-sdk/ryzenai-server#readme) for full documentation.
+          files: ryzenai-server.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,41 +1,39 @@
-# Prerequisites
-*.d
+# Build directories
+build/
+bin/
+lib/
+out/
 
-# Compiled Object files
-*.slo
-*.lo
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+
+# Downloaded dependencies
+external/
+
+# Compiled objects
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
+*.exe
+*.dll
 *.so
 *.dylib
-*.dll
 
-# Fortran module files
-*.mod
-*.smod
+# IDE
+.vscode/
+.idea/
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+# OS
+.DS_Store
+Thumbs.db
 
-# Executables
-*.exe
-*.out
-*.app
-
-# debug information files
-*.dwo
