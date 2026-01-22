@@ -224,10 +224,13 @@ jobs:
           $env:HF_HOME = "${{ github.workspace }}/hf_home"
           
           $mode = "${{ matrix.mode }}"
-          Write-Host "Running verification tests for mode: $mode" -ForegroundColor Cyan
+          $logDir = "${{ github.workspace }}/test_logs"
           
-          # Run the test script
-          python test/test_server.py --mode $mode --server-exe build/bin/Release/ryzenai-server.exe
+          Write-Host "Running verification tests for mode: $mode" -ForegroundColor Cyan
+          Write-Host "Log directory: $logDir" -ForegroundColor Gray
+          
+          # Run the test script with log directory
+          python test/test_server.py --mode $mode --server-exe build/bin/Release/ryzenai-server.exe --log-dir $logDir
           
           if ($LASTEXITCODE -ne 0) {
               Write-Host "ERROR: Tests failed for mode $mode!" -ForegroundColor Red
@@ -235,6 +238,14 @@ jobs:
           }
           
           Write-Host "All tests passed for mode: $mode" -ForegroundColor Green
+
+      - name: Upload server logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs-${{ matrix.mode }}
+          path: ${{ github.workspace }}/test_logs/
+          retention-days: 7
 
   create-release:
     name: Create GitHub Release

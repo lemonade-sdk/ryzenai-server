@@ -19,6 +19,7 @@ import unittest
 import signal
 import requests
 from pathlib import Path
+import httpx
 
 import openai
 
@@ -36,6 +37,12 @@ SERVER_PORT = 8080
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 MAX_NEW_TOKENS = 32
 TEST_PROMPT = "What is the population of Paris?"
+
+# Timeout for all API requests (in seconds)
+REQUEST_TIMEOUT = 60
+
+# Global reference to server log file for printing on failure
+SERVER_LOG_FILE: Path = None
 
 
 def get_model_path(mode: str) -> str:
@@ -59,17 +66,45 @@ def get_model_path(mode: str) -> str:
     return str(model_path)
 
 
+def print_server_log():
+    """Print the server log file contents for debugging."""
+    global SERVER_LOG_FILE
+    if SERVER_LOG_FILE and SERVER_LOG_FILE.exists():
+        print(f"\n{'='*60}")
+        print(f"  SERVER LOG ({SERVER_LOG_FILE})")
+        print(f"{'='*60}")
+        try:
+            content = SERVER_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+            # Print last 200 lines to avoid overwhelming output
+            lines = content.splitlines()
+            if len(lines) > 200:
+                print(f"... (showing last 200 of {len(lines)} lines) ...")
+                lines = lines[-200:]
+            print("\n".join(lines))
+        except Exception as e:
+            print(f"[Error] Could not read server log: {e}")
+        print(f"{'='*60}\n")
+    else:
+        print("[Warning] No server log file available")
+
+
 class ServerProcess:
     """Manages the ryzenai-server process lifecycle."""
 
-    def __init__(self, server_exe: str, model_path: str, mode: str):
+    def __init__(self, server_exe: str, model_path: str, mode: str, log_dir: Path):
         self.server_exe = server_exe
         self.model_path = model_path
         self.mode = mode
         self.process = None
+        self.log_dir = log_dir
+        self.log_file = log_dir / f"server_{mode}.log"
+        self.log_handle = None
 
     def start(self, timeout: int = 120):
         """Start the server and wait for it to be ready."""
+        global SERVER_LOG_FILE
+        SERVER_LOG_FILE = self.log_file
+
         cmd = [
             self.server_exe,
             "-m",
@@ -83,13 +118,19 @@ class ServerProcess:
         ]
 
         print(f"\n[Test] Starting server with command: {' '.join(cmd)}")
+        print(f"[Test] Server log file: {self.log_file}")
 
-        # Start the server process
+        # Ensure log directory exists
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Open log file for writing
+        self.log_handle = open(self.log_file, "w", encoding="utf-8")
+
+        # Start the server process with output redirected to log file
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=self.log_handle,
             stderr=subprocess.STDOUT,
-            text=True,
             creationflags=(
                 subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
             ),
@@ -112,12 +153,16 @@ class ServerProcess:
 
             # Check if process died
             if self.process.poll() is not None:
-                stdout, _ = self.process.communicate()
-                print(f"[Test] Server process died! Output:\n{stdout}")
+                self.log_handle.flush()
+                print(f"[Test] Server process died!")
+                print_server_log()
                 raise RuntimeError("Server process terminated unexpectedly")
 
             time.sleep(1)
 
+        # Timeout - print the log for debugging
+        self.log_handle.flush()
+        print_server_log()
         raise TimeoutError(f"Server did not become ready within {timeout} seconds")
 
     def stop(self):
@@ -144,6 +189,11 @@ class ServerProcess:
 
         self.process = None
 
+        # Close log file handle
+        if self.log_handle:
+            self.log_handle.close()
+            self.log_handle = None
+
 
 class RyzenAIServerTests(unittest.TestCase):
     """Test cases for ryzenai-server endpoints."""
@@ -153,15 +203,16 @@ class RyzenAIServerTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Set up the OpenAI client."""
+        """Set up the OpenAI client with timeout."""
         cls.client = openai.OpenAI(
             base_url=f"{SERVER_URL}/v1",
             api_key="not-needed",  # ryzenai-server doesn't require API key
+            timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
         )
 
     def test_01_health_endpoint(self):
         """Test that the /health endpoint returns OK status."""
-        response = requests.get(f"{SERVER_URL}/health")
+        response = requests.get(f"{SERVER_URL}/health", timeout=REQUEST_TIMEOUT)
 
         self.assertEqual(response.status_code, 200)
 
@@ -286,6 +337,7 @@ class RyzenAIServerTests(unittest.TestCase):
                 "stream": False,
             },
             headers={"Content-Type": "application/json"},
+            timeout=REQUEST_TIMEOUT,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -322,6 +374,7 @@ class RyzenAIServerTests(unittest.TestCase):
             },
             headers={"Content-Type": "application/json"},
             stream=True,
+            timeout=REQUEST_TIMEOUT,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -418,6 +471,12 @@ def main():
         default=None,
         help="Path to ryzenai-server executable (auto-detected if not specified)",
     )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Directory to store server logs (defaults to ./test_logs)",
+    )
 
     args = parser.parse_args()
 
@@ -444,8 +503,16 @@ def main():
         print(f"[Error] Please ensure the model is downloaded to $HF_HOME/hub")
         sys.exit(1)
 
+    # Set up log directory
+    if args.log_dir:
+        log_dir = Path(args.log_dir)
+    else:
+        log_dir = Path(__file__).parent / "test_logs"
+
+    print(f"[Test] Log directory: {log_dir}")
+
     # Start server
-    server = ServerProcess(server_exe, model_path, args.mode)
+    server = ServerProcess(server_exe, model_path, args.mode, log_dir)
 
     try:
         server.start()
@@ -474,6 +541,8 @@ def main():
             print(f"\n{'='*60}")
             print(f"  Some tests FAILED for mode: {args.mode.upper()}")
             print(f"{'='*60}\n")
+            # Print server log on failure
+            print_server_log()
             return 1
 
     except Exception as e:
@@ -481,6 +550,8 @@ def main():
         import traceback
 
         traceback.print_exc()
+        # Print server log on exception
+        print_server_log()
         return 1
 
     finally:
