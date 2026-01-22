@@ -5,17 +5,8 @@ on:
     branches: ["main"]
     tags:
       - v*
-    paths:
-      - '**.cpp'
-      - '**.h'
-      - 'CMakeLists.txt'
-      - '.github/workflows/**'
   pull_request:
-    paths:
-      - '**.cpp'
-      - '**.h'
-      - 'CMakeLists.txt'
-      - '.github/workflows/**'
+
   workflow_dispatch:
 
 permissions:
@@ -141,9 +132,124 @@ jobs:
             build/bin/Release/AMD_LICENSE
           retention-days: 7
 
+  test-ryzenai-server:
+    name: Test RyzenAI Server
+    needs: build-ryzenai-server
+    runs-on: [rai300_400, Windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [cpu, npu, hybrid]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: Download RyzenAI Server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ryzenai-server
+          path: build/bin/Release
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        shell: PowerShell
+        run: |
+          Write-Host "Installing test dependencies..." -ForegroundColor Cyan
+          python -m pip install --upgrade pip
+          python -m pip install -r test/requirements.txt
+          Write-Host "Test dependencies installed!" -ForegroundColor Green
+
+      - name: Download model checkpoint
+        shell: PowerShell
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          # Set HF_HOME to local directory
+          $env:HF_HOME = "${{ github.workspace }}/hf_home"
+          Write-Host "HF_HOME set to: $env:HF_HOME" -ForegroundColor Cyan
+          
+          # Create directory if it doesn't exist
+          if (-not (Test-Path $env:HF_HOME)) {
+              New-Item -ItemType Directory -Path $env:HF_HOME -Force | Out-Null
+          }
+          
+          # Model mapping based on mode
+          $modelMap = @{
+              "npu" = "amd/Qwen2.5-3B-Instruct-onnx-ryzenai-npu"
+              "hybrid" = "amd/Qwen2.5-3B-Instruct-onnx-ryzenai-hybrid"
+              "cpu" = "amd/Qwen2.5-0.5B-Instruct-quantized_int4-float16-cpu-onnx"
+          }
+          
+          $mode = "${{ matrix.mode }}"
+          $modelName = $modelMap[$mode]
+          
+          Write-Host "Downloading model for $mode mode: $modelName" -ForegroundColor Cyan
+          
+          # Download the model using huggingface_hub
+          python -c @"
+          import os
+          os.environ['HF_HOME'] = r'${{ github.workspace }}/hf_home'
+          
+          from huggingface_hub import snapshot_download
+          
+          model_name = '$modelName'
+          print(f'Downloading {model_name}...')
+          
+          local_path = snapshot_download(
+              repo_id=model_name,
+              local_dir=None,  # Use default HF cache
+          )
+          
+          print(f'Model downloaded to: {local_path}')
+          "@
+          
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "ERROR: Failed to download model!" -ForegroundColor Red
+              exit $LASTEXITCODE
+          }
+          
+          Write-Host "Model download complete!" -ForegroundColor Green
+
+      - name: Run verification tests
+        shell: PowerShell
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          # Set HF_HOME
+          $env:HF_HOME = "${{ github.workspace }}/hf_home"
+          
+          $mode = "${{ matrix.mode }}"
+          $logDir = "${{ github.workspace }}/test_logs"
+          
+          Write-Host "Running verification tests for mode: $mode" -ForegroundColor Cyan
+          Write-Host "Log directory: $logDir" -ForegroundColor Gray
+          
+          # Run the test script with log directory
+          python test/test_server.py --mode $mode --server-exe build/bin/Release/ryzenai-server.exe --log-dir $logDir
+          
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "ERROR: Tests failed for mode $mode!" -ForegroundColor Red
+              exit $LASTEXITCODE
+          }
+          
+          Write-Host "All tests passed for mode: $mode" -ForegroundColor Green
+
+      - name: Upload server logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs-${{ matrix.mode }}
+          path: ${{ github.workspace }}/test_logs/
+          retention-days: 7
+
   create-release:
     name: Create GitHub Release
-    needs: build-ryzenai-server
+    needs: [build-ryzenai-server, test-ryzenai-server]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
