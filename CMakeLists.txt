@@ -99,6 +99,7 @@ endif()
 # cpp-httplib
 set(HTTPLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-httplib")
 if(NOT EXISTS "${HTTPLIB_DIR}/httplib.h")
+    file(MAKE_DIRECTORY ${HTTPLIB_DIR})
     message(STATUS "Downloading cpp-httplib...")
     file(DOWNLOAD
         "https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.26.0/httplib.h"
@@ -110,6 +111,7 @@ endif()
 # nlohmann/json
 set(JSON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/json")
 if(NOT EXISTS "${JSON_DIR}/json.hpp")
+    file(MAKE_DIRECTORY ${JSON_DIR})
     message(STATUS "Downloading nlohmann/json...")
     file(DOWNLOAD
         "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
@@ -165,11 +167,14 @@ target_compile_definitions(ryzenai-server PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=8
 
 # Backend-specific compile definitions
 if(BUILD_RYZEN)
-    target_compile_definitions(ryzenai-server PRIVATE BUILD_RYZEN)
+    target_compile_definitions(ryzenai-server PRIVATE BUILD_RYZEN RYZENAI_ON)
 endif()
 
 if(BUILD_MLX)
-    target_compile_definitions(ryzenai-server PRIVATE BUILD_MLX)
+    target_compile_definitions(ryzenai-server PRIVATE BUILD_MLX MLX_ON)
+    if(MLX_CUDA)
+        target_compile_definitions(ryzenai-server PRIVATE MLX_CUDA_ON)
+    endif()
 endif()
 
 # Windows-specific settings

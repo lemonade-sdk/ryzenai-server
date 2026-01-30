@@ -28,6 +28,7 @@ external/
 *.dll
 *.so
 *.dylib
+.cache
 
 # IDE
 .vscode/
