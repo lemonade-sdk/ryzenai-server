@@ -1,6 +1,12 @@
 #include "ryzenai/inference_engine.h"
+#ifdef RYZENAI_ON
 #include <ort_genai.h>
 #include <ort_genai_c.h>
+#elif MLX_ON
+//MacOS Specific Enablement
+#elif MLX_CUDA_ON
+//CUDA and HIP Specific Enablement
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>
