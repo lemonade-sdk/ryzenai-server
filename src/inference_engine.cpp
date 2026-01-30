@@ -4,8 +4,8 @@
 #include <ort_genai_c.h>
 #elif MLX_ON
 //MacOS Specific Enablement
-#elif MLX_CUDA_ON
-//CUDA and HIP Specific Enablement
+#include "ryzenai/mlx/mlx_oga.h"
+#include "ryzenai/mlx/gemma_inference.h"
 #endif
 #include <filesystem>
 #include <fstream>
@@ -216,14 +216,30 @@ bool InferenceEngine::validateModelDirectory(const std::string& path) {
         std::cerr << "[ERROR] Model path does not exist or is not a directory: " << path << std::endl;
         return false;
     }
-    
-    // Check for required files (at minimum genai_config.json)
-    std::string config_path = path + "/genai_config.json";
-    if (!fs::exists(config_path)) {
-        std::cerr << "[ERROR] Required file not found: " << config_path << std::endl;
+
+    // Check for required files
+    std::string onnx_config_path = path + "/genai_config.json";
+    std::string mlx_config_path = path + "/config.json";
+
+    bool has_onnx_config = fs::exists(onnx_config_path);
+    bool has_mlx_config = fs::exists(mlx_config_path);
+
+#ifdef MLX_ON
+    // MLX backend: accept either ONNX or MLX config files
+    if (!has_onnx_config && !has_mlx_config) {
+        std::cerr << "[ERROR] Required config file not found. Expected either:" << std::endl;
+        std::cerr << "[ERROR]   - " << onnx_config_path << " (ONNX models)" << std::endl;
+        std::cerr << "[ERROR]   - " << mlx_config_path << " (MLX models)" << std::endl;
         return false;
     }
-    
+#else
+    // ONNX/RyzenAI backend: require ONNX config
+    if (!has_onnx_config) {
+        std::cerr << "[ERROR] Required file not found: " << onnx_config_path << std::endl;
+        return false;
+    }
+#endif
+
     return true;
 }
 
@@ -373,7 +389,10 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
         
         // Generate
         auto generator = OgaGenerator::Create(*model_, *gen_params);
-        
+#ifdef MLX_ON
+        generator->SetTokenizer(*tokenizer_);
+#endif
+
         // Set input tokens
         generator->AppendTokens(input_ids.data(), input_ids.size());
         
@@ -490,7 +509,9 @@ void InferenceEngine::streamComplete(const std::string& prompt,
         
         // Generate
         auto generator = OgaGenerator::Create(*model_, *gen_params);
-        
+#ifdef MLX_ON
+        generator->SetTokenizer(*tokenizer_);
+#endif
         // Set input tokens
         generator->AppendTokens(input_ids.data(), input_ids.size());
         

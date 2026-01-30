@@ -116,8 +116,13 @@ void OpenBrowser(const std::string& url) {
 
 #else
 
+#ifdef __APPLE__
+std::string GetNPUDriverVersion() { return ""; }  // Return empty on macOS to skip version check
+#else
 std::string GetNPUDriverVersion() { return "0.0.0.0"; }
-void OpenBrowser(const std::string& url) { 
+#endif
+
+void OpenBrowser(const std::string& url) {
     std::cout << "Please visit: " << url << std::endl;
 }
 
@@ -156,9 +161,16 @@ bool IsVersionLessThan(const std::string& v1, const std::string& v2) {
 
 bool CheckNPUDriverVersion() {
     std::string version = GetNPUDriverVersion();
-    
+    std::cout << "[DEBUG] GetNPUDriverVersion returned: '" << version << "'" << std::endl;
+
     if (version.empty()) {
         std::cout << "[Server] NPU Driver Version: Unknown (Could not detect)" << std::endl;
+#ifdef __APPLE__
+        // On macOS, Ryzen AI drivers don't exist, so MLX is the only backend
+        // Allow startup to proceed for MLX models
+        std::cout << "[Server] macOS detected - allowing startup for MLX backend" << std::endl;
+        return true;
+#endif
         return true; // Assume OK if we can't detect, to not block users with weird setups
     }
     

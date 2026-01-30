@@ -58,7 +58,6 @@ if(BUILD_RYZEN)
     endif()
 endif()
 
-# Download header-only libraries if not present
 include(FetchContent)
 
 # MLX dependencies
@@ -67,12 +66,25 @@ if(BUILD_MLX)
         message(FATAL_ERROR "BUILD_MLX is only supported on macOS and Linux")
     endif()
 
+    set(CMAKE_POLICY_VERSION_MINIMUM "3.5")
+    # SentencePiece library
+    message(STATUS "Fetching SentencePiece...")
+    FetchContent_Declare(
+        sentencepiece
+        GIT_REPOSITORY https://github.com/google/sentencepiece.git
+        GIT_TAG v0.2.0
+        GIT_SHALLOW FALSE      # <--- Faster download
+        GIT_PROGRESS TRUE     # <--- SHOWS YOU THE DOWNLOAD BAR
+    )
+    FetchContent_MakeAvailable(sentencepiece)
+    set(SENTENCEPIECE_INCLUDE_DIRS ${sentencepiece_SOURCE_DIR}/src)
+
     message(STATUS "Fetching MLX...")
     FetchContent_Declare(
         mlx
         GIT_REPOSITORY https://github.com/ml-explore/mlx.git
         GIT_TAG main
-        GIT_SHALLOW TRUE      # <--- Faster download
+        GIT_SHALLOW FALSE      # <--- Faster download
         GIT_PROGRESS TRUE     # <--- SHOWS YOU THE DOWNLOAD BAR
     )
     # Disable MLX extras to speed up build
@@ -88,6 +100,8 @@ if(BUILD_MLX)
     endif()
 
     FetchContent_MakeAvailable(mlx)
+    # Set include directories for MLX
+    set(MLX_INCLUDE_DIRS ${mlx_SOURCE_DIR}/include)
 endif()
 # Validate build options after platform-specific checks
 if(NOT BUILD_RYZEN AND NOT BUILD_MLX)
@@ -130,7 +144,15 @@ set(SOURCES
     src/tool_calls.cpp
     src/reasoning.cpp
     src/driver_check.cpp
+    src/mlx/mlx_oga.cpp
+    src/mlx/quantization.cpp
+    src/mlx/gemma_inference.cpp
+    src/mlx/phi3_inference.cpp
+    src/mlx/inference_factory.cpp
+    src/mlx/tokenizer.cpp
 )
+
+# SentencePiece is header-only for our use case
 
 # Create executable
 add_executable(ryzenai-server ${SOURCES})
@@ -147,7 +169,10 @@ if(BUILD_RYZEN)
 endif()
 
 if(BUILD_MLX)
-    target_include_directories(ryzenai-server PRIVATE ${MLX_INCLUDE_DIRS})
+    target_include_directories(ryzenai-server PRIVATE
+        ${MLX_INCLUDE_DIRS}
+        ${SENTENCEPIECE_INCLUDE_DIRS}
+    )
 endif()
 
 # Link libraries
@@ -158,8 +183,7 @@ if(BUILD_RYZEN)
 endif()
 
 if(BUILD_MLX)
-    add_dependencies(ryzenai-server mlx)
-    target_link_libraries(ryzenai-server PRIVATE ${MLX_LIBRARIES})
+    target_link_libraries(ryzenai-server PRIVATE mlx sentencepiece-static)
 endif()
 
 # Enable multi-threading for cpp-httplib
