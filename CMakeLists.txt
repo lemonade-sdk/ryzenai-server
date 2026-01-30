@@ -5,6 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Build options
+option(BUILD_RYZEN "Build with Ryzen AI support" ON)
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    option(BUILD_MLX "Build with MLX support" ON)
+    option(MLX_CUDA "Enable CUDA support for MLX" ON)
+else()
+    option(BUILD_MLX "Build with MLX support" OFF)
+endif()
+
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -16,33 +25,76 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 # Find dependencies
 find_package(Threads REQUIRED)
 
-# ONNX Runtime GenAI
-set(OGA_ROOT "C:/Program Files/RyzenAI/1.6.0" CACHE PATH "Path to Ryzen AI installation")
+# Ryzen AI dependencies
+if(BUILD_RYZEN)
+    # ONNX Runtime GenAI
+    if(WIN32)
+        set(OGA_ROOT "C:/Program Files/RyzenAI/1.6.0" CACHE PATH "Path to Ryzen AI installation")
 
-if(NOT EXISTS ${OGA_ROOT})
-    message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.6.0 or set OGA_ROOT")
+        if(NOT EXISTS ${OGA_ROOT})
+            message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.6.0 or set OGA_ROOT")
+        endif()
+
+        message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
+
+        # Find ONNX Runtime GenAI library (it's in LLM subfolder)
+        find_library(OGA_LIB
+            NAMES onnxruntime-genai
+            PATHS ${OGA_ROOT}/LLM/lib
+            REQUIRED
+        )
+
+        find_path(OGA_INCLUDE
+            NAMES ort_genai.h
+            PATHS ${OGA_ROOT}/LLM/include
+            REQUIRED
+        )
+
+        message(STATUS "ONNX Runtime GenAI library: ${OGA_LIB}")
+        message(STATUS "ONNX Runtime GenAI include: ${OGA_INCLUDE}")
+    else()
+        message(WARNING "Ryzen AI is only supported on Windows. Disabling Ryzen AI support.")
+        set(BUILD_RYZEN OFF CACHE BOOL "Build with Ryzen AI support" FORCE)
+    endif()
 endif()
-
-message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
-
-# Find ONNX Runtime GenAI library (it's in LLM subfolder)
-find_library(OGA_LIB 
-    NAMES onnxruntime-genai
-    PATHS ${OGA_ROOT}/LLM/lib
-    REQUIRED
-)
-
-find_path(OGA_INCLUDE 
-    NAMES ort_genai.h
-    PATHS ${OGA_ROOT}/LLM/include
-    REQUIRED
-)
-
-message(STATUS "ONNX Runtime GenAI library: ${OGA_LIB}")
-message(STATUS "ONNX Runtime GenAI include: ${OGA_INCLUDE}")
 
 # Download header-only libraries if not present
 include(FetchContent)
+
+# MLX dependencies
+if(BUILD_MLX)
+    if(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "BUILD_MLX is only supported on macOS and Linux")
+    endif()
+
+    message(STATUS "Fetching MLX...")
+    FetchContent_Declare(
+        mlx
+        GIT_REPOSITORY https://github.com/ml-explore/mlx.git
+        GIT_TAG main
+        GIT_SHALLOW TRUE      # <--- Faster download
+        GIT_PROGRESS TRUE     # <--- SHOWS YOU THE DOWNLOAD BAR
+    )
+    # Disable MLX extras to speed up build
+    set(MLX_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+    set(MLX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(MLX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    set(MLX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    # Set CUDA support based on platform and option
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(MLX_BUILD_CUDA ${MLX_CUDA} CACHE BOOL "" FORCE)
+    else()
+        set(MLX_BUILD_CUDA OFF CACHE BOOL "" FORCE)
+    endif()
+
+    FetchContent_MakeAvailable(mlx)
+endif()
+# Validate build options after platform-specific checks
+if(NOT BUILD_RYZEN AND NOT BUILD_MLX)
+    message(FATAL_ERROR "At least one backend must be enabled. Set BUILD_RYZEN=ON or BUILD_MLX=ON")
+endif()
+
+
 
 # cpp-httplib
 set(HTTPLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-httplib")
@@ -84,71 +136,96 @@ add_executable(ryzenai-server ${SOURCES})
 # Include directories
 target_include_directories(ryzenai-server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${OGA_INCLUDE}
     ${HTTPLIB_DIR}
     ${JSON_DIR}
 )
 
+if(BUILD_RYZEN)
+    target_include_directories(ryzenai-server PRIVATE ${OGA_INCLUDE})
+endif()
+
+if(BUILD_MLX)
+    target_include_directories(ryzenai-server PRIVATE ${MLX_INCLUDE_DIRS})
+endif()
+
 # Link libraries
-target_link_libraries(ryzenai-server PRIVATE
-    ${OGA_LIB}
-    Threads::Threads
-)
+target_link_libraries(ryzenai-server PRIVATE Threads::Threads)
+
+if(BUILD_RYZEN)
+    target_link_libraries(ryzenai-server PRIVATE ${OGA_LIB})
+endif()
+
+if(BUILD_MLX)
+    add_dependencies(ryzenai-server mlx)
+    target_link_libraries(ryzenai-server PRIVATE ${MLX_LIBRARIES})
+endif()
 
 # Enable multi-threading for cpp-httplib
 target_compile_definitions(ryzenai-server PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=8)
+
+# Backend-specific compile definitions
+if(BUILD_RYZEN)
+    target_compile_definitions(ryzenai-server PRIVATE BUILD_RYZEN)
+endif()
+
+if(BUILD_MLX)
+    target_compile_definitions(ryzenai-server PRIVATE BUILD_MLX)
+endif()
 
 # Windows-specific settings
 if(WIN32)
     # Target Windows 10 or later (required for cpp-httplib v0.26.0)
     target_compile_definitions(ryzenai-server PRIVATE _WIN32_WINNT=0x0A00)
     target_link_libraries(ryzenai-server PRIVATE ws2_32 wbemuuid ole32 oleaut32 shell32)
-    
-    # Copy required DLLs to output directory (they're in deployment folder)
-    set(REQUIRED_DLLS
-        "${OGA_ROOT}/deployment/onnxruntime-genai.dll"
-        "${OGA_ROOT}/deployment/onnxruntime.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_providers_shared.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_providers_vitisai.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_vitisai_ep.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_vitis_ai_custom_ops.dll"
-        "${OGA_ROOT}/deployment/onnx_custom_ops.dll"
-        "${OGA_ROOT}/deployment/abseil_dll.dll"
-        "${OGA_ROOT}/deployment/libutf8_validity.dll"
-        "${OGA_ROOT}/deployment/dyn_dispatch_core.dll"
-        "${OGA_ROOT}/deployment/DirectML.dll"
-        "${OGA_ROOT}/deployment/zlib.dll"
-        "${OGA_ROOT}/deployment/zstd.dll"
-        "${OGA_ROOT}/deployment/ryzenai_onnx_utils.dll"
-        "${OGA_ROOT}/deployment/ryzen_mm.dll"
-        "${OGA_ROOT}/deployment/aiecompiler_client.dll"
-    )
-    
+
     # Set console subsystem explicitly
     set_target_properties(ryzenai-server PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:CONSOLE"
     )
-    
-    foreach(DLL ${REQUIRED_DLLS})
-        if(EXISTS ${DLL})
-            add_custom_command(TARGET ryzenai-server POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${DLL}
-                $<TARGET_FILE_DIR:ryzenai-server>
-                COMMENT "Copying ${DLL}"
-            )
-        else()
-            message(WARNING "DLL not found: ${DLL}")
-        endif()
-    endforeach()
-    
-    # Copy AMD_LICENSE to output directory
-    add_custom_command(TARGET ryzenai-server POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/AMD_LICENSE
-        $<TARGET_FILE_DIR:ryzenai-server>/AMD_LICENSE
-        COMMENT "Copying AMD_LICENSE"
-    )
+
+    # Ryzen AI specific Windows settings
+    if(BUILD_RYZEN)
+        # Copy required DLLs to output directory (they're in deployment folder)
+        set(REQUIRED_DLLS
+            "${OGA_ROOT}/deployment/onnxruntime-genai.dll"
+            "${OGA_ROOT}/deployment/onnxruntime.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_providers_shared.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_providers_vitisai.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_vitisai_ep.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_vitis_ai_custom_ops.dll"
+            "${OGA_ROOT}/deployment/onnx_custom_ops.dll"
+            "${OGA_ROOT}/deployment/abseil_dll.dll"
+            "${OGA_ROOT}/deployment/libutf8_validity.dll"
+            "${OGA_ROOT}/deployment/dyn_dispatch_core.dll"
+            "${OGA_ROOT}/deployment/DirectML.dll"
+            "${OGA_ROOT}/deployment/zlib.dll"
+            "${OGA_ROOT}/deployment/zstd.dll"
+            "${OGA_ROOT}/deployment/ryzenai_onnx_utils.dll"
+            "${OGA_ROOT}/deployment/ryzen_mm.dll"
+            "${OGA_ROOT}/deployment/aiecompiler_client.dll"
+        )
+
+        foreach(DLL ${REQUIRED_DLLS})
+            if(EXISTS ${DLL})
+                add_custom_command(TARGET ryzenai-server POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${DLL}
+                    $<TARGET_FILE_DIR:ryzenai-server>
+                    COMMENT "Copying ${DLL}"
+                )
+            else()
+                message(WARNING "DLL not found: ${DLL}")
+            endif()
+        endforeach()
+
+        # Copy AMD_LICENSE to output directory
+        add_custom_command(TARGET ryzenai-server POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/AMD_LICENSE
+            $<TARGET_FILE_DIR:ryzenai-server>/AMD_LICENSE
+            COMMENT "Copying AMD_LICENSE"
+        )
+    endif()
 endif()
 
 # Compiler warnings
@@ -167,7 +244,15 @@ install(TARGETS ryzenai-server
 message(STATUS "==========================================================")
 message(STATUS "Ryzen AI LLM Server Configuration:")
 message(STATUS "  Build type:        ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Ryzen AI path:     ${OGA_ROOT}")
+if(BUILD_RYZEN)
+    message(STATUS "  Ryzen AI:          ENABLED (${OGA_ROOT})")
+else()
+    message(STATUS "  Ryzen AI:          DISABLED")
+endif()
+if(BUILD_MLX)
+    message(STATUS "  MLX:               ENABLED")
+else()
+    message(STATUS "  MLX:               DISABLED")
+endif()
 message(STATUS "  Output directory:  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "==========================================================")
-
