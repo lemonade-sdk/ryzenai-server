@@ -183,8 +183,9 @@ std::string MlxBackend::complete(const std::string& prompt, const GenerationPara
     // 2. Hardware limit based on GPU's max buffer size
     //
     // Memory calculation for attention:
-    //   attention_memory = num_heads * seq_len^2 * bytes_per_element (FP16 = 2)
-    //   max_seq = sqrt(max_buffer / (num_heads * 2))
+    //   attention_memory = num_heads * seq_len^2 * bytes_per_element
+    //   bytes_per_element depends on KV format: FP16=2, INT8=1, INT4=0.5
+    //   max_seq = sqrt(max_buffer / (num_heads * bytes_per_element))
     //
     // We use 50% of max_buffer to leave room for KV cache and other allocations
     int user_max_tokens = model_->max_context_length;
@@ -198,17 +199,30 @@ std::string MlxBackend::complete(const std::string& prompt, const GenerationPara
             size_t max_buffer = std::get<size_t>(it->second);
             // Use 50% of max buffer for attention, leave rest for KV cache and weights
             size_t available_for_attention = max_buffer / 2;
-            // attention_memory = num_heads * seq_len^2 * 2 (FP16)
+            
+            // Bytes per element depends on KV format
+            // FP16: 2 bytes, INT8: 1 byte, INT4: 0.5 bytes
+            double bytes_per_element = 2.0;  // Default FP16
+            const char* format_name = "FP16";
+            if (model_->kv_format == KVCacheMode::INT8) {
+                bytes_per_element = 1.0;
+                format_name = "INT8";
+            } else if (model_->kv_format == KVCacheMode::INT4) {
+                bytes_per_element = 0.5;
+                format_name = "INT4";
+            }
+            
             int num_heads = model_->num_attention_heads;
-            // max_seq = sqrt(available / (num_heads * 2))
+            // max_seq = sqrt(available / (num_heads * bytes_per_element))
             hardware_max_tokens = static_cast<int>(std::sqrt(
-                static_cast<double>(available_for_attention) / (num_heads * 2)
+                static_cast<double>(available_for_attention) / (num_heads * bytes_per_element)
             ));
             
             // Log only once on first request
             static bool logged_once = false;
             if (!logged_once) {
                 std::cout << "[MlxBackend] GPU max_buffer_length: " << (max_buffer / 1024 / 1024) << " MB, "
+                          << "KV format: " << format_name << ", "
                           << "calculated safe max context: " << hardware_max_tokens << " tokens" << std::endl;
                 logged_once = true;
             }
@@ -356,11 +370,20 @@ void MlxBackend::streamComplete(const std::string& prompt, const GenerationParam
             size_t max_buffer = std::get<size_t>(it->second);
             // Use 50% of max buffer for attention, leave rest for KV cache and weights
             size_t available_for_attention = max_buffer / 2;
-            // attention_memory = num_heads * seq_len^2 * 2 (FP16)
+            
+            // Bytes per element depends on KV format
+            // FP16: 2 bytes, INT8: 1 byte, INT4: 0.5 bytes
+            double bytes_per_element = 2.0;  // Default FP16
+            if (model_->kv_format == KVCacheMode::INT8) {
+                bytes_per_element = 1.0;
+            } else if (model_->kv_format == KVCacheMode::INT4) {
+                bytes_per_element = 0.5;
+            }
+            
             int num_heads = model_->num_attention_heads;
-            // max_seq = sqrt(available / (num_heads * 2))
+            // max_seq = sqrt(available / (num_heads * bytes_per_element))
             hardware_max_tokens = static_cast<int>(std::sqrt(
-                static_cast<double>(available_for_attention) / (num_heads * 2)
+                static_cast<double>(available_for_attention) / (num_heads * bytes_per_element)
             ));
         }
     } catch (...) {
