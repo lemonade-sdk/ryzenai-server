@@ -449,9 +449,14 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
     std::lock_guard<std::mutex> lock(inference_mutex_);
     
     try {
-        auto start_time = std::chrono::high_resolution_clock::now();
+        // ==================== PROFILING START ====================
+        auto total_start = std::chrono::high_resolution_clock::now();
+        auto tokenize_start = total_start;
+        
         auto sequences = OgaSequences::Create();
         tokenizer_->Encode(prompt.c_str(), *sequences);
+        
+        auto tokenize_end = std::chrono::high_resolution_clock::now();
         
         const int32_t* input_ids_ptr = sequences->SequenceData(0);
         size_t input_ids_count = sequences->SequenceCount(0);
@@ -479,42 +484,61 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
         
         std::cout << "[InferenceEngine] Generating..." << std::endl;
 
-        // Get model-specific stop sequences
-        std::vector<std::string> model_stop_sequences;
+        // OPTIMIZATION: Pre-compute stop token IDs (avoid string decode every token)
+        std::vector<int32_t> stop_token_ids;
 #ifdef MLX_ON
-        model_stop_sequences = model_->GetStopSequences();
+        // Get CHAT_END and other stop token IDs
+        for (const auto& tag : model_->additional_tags) {
+            if ((tag.type == SpecialTokenType::CHAT_END || 
+                 tag.type == SpecialTokenType::THINKING_END) && tag.token_id >= 0) {
+                stop_token_ids.push_back(tag.token_id);
+            }
+        }
+#else
+        for (const auto& tag : fallback_additional_tags_) {
+            if ((tag.type == SpecialTokenType::CHAT_END ||
+                 tag.type == SpecialTokenType::THINKING_END) && tag.token_id >= 0) {
+                stop_token_ids.push_back(tag.token_id);
+            }
+        }
 #endif
 
-        auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer_);
-        std::string accumulated_output;
+        // Track generated token IDs for final decode (avoids per-token string decode)
+        std::vector<int32_t> generated_tokens;
+        generated_tokens.reserve(params.max_length);
+        
+        auto prefill_start = std::chrono::high_resolution_clock::now();
+        bool first_token = true;
+        auto decode_start = prefill_start;
 
         while (!generator->IsDone()) {
             generator->GenerateNextToken();
+            
+            if (first_token) {
+                decode_start = std::chrono::high_resolution_clock::now();
+                first_token = false;
+            }
 
             const int32_t* seq = generator->GetSequenceData(0);
-            if (generator->GetSequenceCount(0) > 0) {
-                int32_t new_token = seq[generator->GetSequenceCount(0) - 1];
+            size_t seq_count = generator->GetSequenceCount(0);
+            if (seq_count > 0) {
+                int32_t new_token = seq[seq_count - 1];
+                
+                // FAST: Check EOS (integer comparison)
                 if (model_->IsEos(new_token)) break;
-
-                // Check for string stop sequences
-                const char* decoded = tokenizer_stream->Decode(new_token);
-                if (decoded && decoded[0] != '\0') {
-                    std::string token_str(decoded);
-                    std::string temp_output = accumulated_output + token_str;
-
-                    // Check model-specific stop sequences
-                    bool should_stop = false;
-                    for (const auto& stop_seq : model_stop_sequences) {
-                        if (temp_output.find(stop_seq) != std::string::npos) {
-                            std::cout << "[InferenceEngine] Stop sequence detected: '" << stop_seq << "' - Stopping generation." << std::endl;
-                            should_stop = true;
-                            break;
-                        }
+                
+                // FAST: Check stop token IDs (integer comparison, no string decode)
+                bool is_stop_token = false;
+                for (int32_t stop_id : stop_token_ids) {
+                    if (new_token == stop_id) {
+                        is_stop_token = true;
+                        break;
                     }
-                    if (should_stop) break;
-
-                    accumulated_output = temp_output;
                 }
+                if (is_stop_token) break;
+                
+                // Store token ID for batch decode at end
+                generated_tokens.push_back(new_token);
             }
         }
         
@@ -525,9 +549,21 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
         
         if (out_timing) {
             int generated_count = (output_count > input_ids.size()) ? (output_count - input_ids.size()) : 0;
-            auto total = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            auto total = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - total_start);
             out_timing->total_time_ms = static_cast<double>(total.count());
             out_timing->token_count = generated_count;
+            
+            // Detailed profiling
+            out_timing->tokenize_ms = std::chrono::duration<double, std::milli>(tokenize_end - tokenize_start).count();
+            out_timing->prefill_ms = std::chrono::duration<double, std::milli>(decode_start - prefill_start).count();
+            out_timing->decode_ms = std::chrono::duration<double, std::milli>(end_time - decode_start).count();
+            
+            // Print profile summary
+            std::cout << "[PROFILE] tokenize=" << out_timing->tokenize_ms << "ms"
+                      << " prefill=" << out_timing->prefill_ms << "ms"
+                      << " decode=" << out_timing->decode_ms << "ms"
+                      << " (" << generated_count << " tokens @ " 
+                      << (generated_count * 1000.0 / out_timing->decode_ms) << " tok/s)" << std::endl;
         }
         
         std::string result;
