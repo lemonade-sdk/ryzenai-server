@@ -22,7 +22,22 @@ namespace ryzenai {
 
 // Forward declarations
 struct GenerationParams;
-struct CompletionTimingData;
+
+/*
+ * CompletionTimingData - Performance timing information
+ */
+struct CompletionTimingData {
+    int token_count = 0;           // Number of generated tokens
+    double ttft_seconds = 0.0;     // Time to first token in seconds
+    double tps = 0.0;              // Tokens per second (decode speed)
+    double total_time_ms = 0.0;    // Total completion time in milliseconds
+    
+    // Detailed profiling
+    double tokenize_ms = 0.0;      // Input tokenization time
+    double prefill_ms = 0.0;       // First token / prefill time
+    double decode_ms = 0.0;        // Total decode time (excluding prefill)
+    double detokenize_ms = 0.0;    // Output detokenization time
+};
 
 /*
  * BackendType - Enum for available backends
@@ -30,6 +45,7 @@ struct CompletionTimingData;
 enum class BackendType {
     AUTO,           // Auto-detect based on platform
     ONNX_RYZENAI,   // ONNX Runtime with RyzenAI NPU (Windows)
+    ONNX_DIRECTML,  // ONNX Runtime with DirectML (Windows GPU)
     ONNX_CPU,       // ONNX Runtime CPU (cross-platform)
     MLX_METAL,      // Apple MLX with Metal (macOS)
     MLX_ROCM,       // MLX with ROCm (AMD GPUs on Linux)
@@ -134,6 +150,7 @@ public:
         switch (type) {
             case BackendType::AUTO: return "auto";
             case BackendType::ONNX_RYZENAI: return "onnx-ryzenai";
+            case BackendType::ONNX_DIRECTML: return "onnx-directml";
             case BackendType::ONNX_CPU: return "onnx-cpu";
             case BackendType::MLX_METAL: return "mlx-metal";
             case BackendType::MLX_ROCM: return "mlx-rocm";
@@ -145,6 +162,7 @@ public:
     static BackendType parseBackendType(const std::string& str) {
         if (str == "auto") return BackendType::AUTO;
         if (str == "onnx-ryzenai" || str == "ryzenai" || str == "npu") return BackendType::ONNX_RYZENAI;
+        if (str == "onnx-directml" || str == "directml" || str == "dml") return BackendType::ONNX_DIRECTML;
         if (str == "onnx-cpu" || str == "cpu") return BackendType::ONNX_CPU;
         if (str == "mlx" || str == "metal" || str == "mlx-metal") return BackendType::MLX_METAL;
         if (str == "rocm" || str == "mlx-rocm") return BackendType::MLX_ROCM;

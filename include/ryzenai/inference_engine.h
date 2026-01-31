@@ -17,19 +17,7 @@
 
 namespace ryzenai {
 
-// Timing data returned from completion
-struct CompletionTimingData {
-    int token_count = 0;           // Number of generated tokens
-    double ttft_seconds = 0.0;     // Time to first token in seconds
-    double tps = 0.0;              // Tokens per second (decode speed)
-    double total_time_ms = 0.0;    // Total completion time in milliseconds
-    
-    // Detailed profiling
-    double tokenize_ms = 0.0;      // Input tokenization time
-    double prefill_ms = 0.0;       // First token / prefill time
-    double decode_ms = 0.0;        // Total decode time (excluding prefill)
-    double detokenize_ms = 0.0;    // Output detokenization time
-};
+// CompletionTimingData is defined in backend/backend.h
 
 // Optimization settings passed from command line
 struct OptimizationSettings {

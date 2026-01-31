@@ -134,38 +134,43 @@ if(NOT EXISTS "${JSON_DIR}/json.hpp")
     )
 endif()
 
-# Model inference sources (organized by architecture family)
-set(MODEL_SOURCES
-    # Phi family
-    src/mlx/models/phi3_inference.cpp
-    #src/mlx/models/phi_inference.cpp
-    
-    # Gemma family
-    #src/mlx/models/gemma_inference.cpp
-    
-    # Qwen family
-    src/mlx/models/qwen3_inference.cpp
-    src/mlx/models/qwen3_moe_inference.cpp
-    #src/mlx/models/qwen3_next_inference.cpp
-    
-    # Deepseek family
-    #src/mlx/models/deepseek_inference.cpp
-    
-    # Llama-based (base for many models)
-    #src/mlx/models/llama_inference.cpp
-    
-    # MoE models
-    #src/mlx/models/mixtral_inference.cpp
-)
+# Model inference sources (organized by architecture family) - only for MLX
+set(MODEL_SOURCES "")
+set(MLX_CORE_SOURCES "")
 
-# MLX core sources
-set(MLX_CORE_SOURCES
-    src/mlx/mlx_oga.cpp
-    src/mlx/quantization.cpp
-    src/mlx/inference_factory.cpp
-    src/mlx/tokenizer.cpp
-    src/mlx/moe.cpp
-)
+if(BUILD_MLX)
+    set(MODEL_SOURCES
+        # Phi family
+        src/mlx/models/phi3_inference.cpp
+        #src/mlx/models/phi_inference.cpp
+        
+        # Gemma family
+        #src/mlx/models/gemma_inference.cpp
+        
+        # Qwen family
+        src/mlx/models/qwen3_inference.cpp
+        src/mlx/models/qwen3_moe_inference.cpp
+        #src/mlx/models/qwen3_next_inference.cpp
+        
+        # Deepseek family
+        #src/mlx/models/deepseek_inference.cpp
+        
+        # Llama-based (base for many models)
+        #src/mlx/models/llama_inference.cpp
+        
+        # MoE models
+        #src/mlx/models/mixtral_inference.cpp
+    )
+
+    # MLX core sources
+    set(MLX_CORE_SOURCES
+        src/mlx/mlx_oga.cpp
+        src/mlx/quantization.cpp
+        src/mlx/inference_factory.cpp
+        src/mlx/tokenizer.cpp
+        src/mlx/moe.cpp
+    )
+endif()
 
 # Backend abstraction sources (conditional compilation)
 set(BACKEND_SOURCES "")

@@ -113,7 +113,7 @@ std::vector<int32_t> OnnxBackend::encode(const std::string& text) {
     
     size_t count = 0;
     const int32_t* ids = OgaSequencesGetSequenceData(sequences, 0);
-    OgaSequencesGetSequenceCount(sequences, 0, &count);
+    OgaSequencesGetSequenceCount(sequences, &count);
     
     std::vector<int32_t> result_ids(ids, ids + count);
     OgaDestroySequences(sequences);
@@ -242,7 +242,7 @@ std::string OnnxBackend::complete(const std::string& prompt, const GenerationPar
         }
         
         size_t seq_count = 0;
-        OgaGenerator_GetSequenceCount(generator, 0, &seq_count);
+        OgaGenerator_GetSequenceCount(generator, &seq_count);
         const int32_t* seq = OgaGenerator_GetSequenceData(generator, 0);
         
         if (seq_count > 0) {
@@ -366,7 +366,7 @@ void OnnxBackend::streamComplete(const std::string& prompt, const GenerationPara
         }
         
         size_t seq_count = 0;
-        OgaGenerator_GetSequenceCount(generator, 0, &seq_count);
+        OgaGenerator_GetSequenceCount(generator, &seq_count);
         const int32_t* seq = OgaGenerator_GetSequenceData(generator, 0);
         int32_t new_token = seq[seq_count - 1];
         
