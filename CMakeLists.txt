@@ -142,24 +142,9 @@ if(BUILD_MLX)
     set(MODEL_SOURCES
         # Phi family
         src/mlx/models/phi3_inference.cpp
-        #src/mlx/models/phi_inference.cpp
-        
-        # Gemma family
-        #src/mlx/models/gemma_inference.cpp
-        
         # Qwen family
         src/mlx/models/qwen3_inference.cpp
         src/mlx/models/qwen3_moe_inference.cpp
-        #src/mlx/models/qwen3_next_inference.cpp
-        
-        # Deepseek family
-        #src/mlx/models/deepseek_inference.cpp
-        
-        # Llama-based (base for many models)
-        #src/mlx/models/llama_inference.cpp
-        
-        # MoE models
-        #src/mlx/models/mixtral_inference.cpp
     )
 
     # MLX core sources
@@ -222,7 +207,9 @@ if(BUILD_RYZEN)
 endif()
 
 if(BUILD_MLX)
+    # MLX-specific include directories (library + internal headers)
     target_include_directories(ryzenai-server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/ryzenai/mlx
         ${MLX_INCLUDE_DIRS}
         ${SENTENCEPIECE_INCLUDE_DIRS}
     )
