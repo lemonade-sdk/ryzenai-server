@@ -4,7 +4,6 @@
 #include <utility>
 #include <vector>
 #include "ryzenai/types.h"
-#include "ryzenai/mlx/model.h"
 
 namespace ryzenai {
 
