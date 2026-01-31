@@ -554,14 +554,13 @@ array Qwen3Inference::self_attention_fast(const array& x, const ryzenai::mlx::La
     int B = static_cast<int>(x.shape(0));
     int L = static_cast<int>(x.shape(1));
     
-    // 1. Projections using direct references
-    array queries = linear_fast(x, layer.attention.q_proj);
-    array keys = linear_fast(x, layer.attention.k_proj);
-    array values = linear_fast(x, layer.attention.v_proj);
-    
-    queries = reshape(queries, {B, L, model_.num_attention_heads, head_dim_});
-    keys = reshape(keys, {B, L, model_.num_key_value_heads, head_dim_});
-    values = reshape(values, {B, L, model_.num_key_value_heads, head_dim_});
+    // Direct Q/K/V projections (Qwen3 architecture)
+    array queries = reshape(linear_fast(x, layer.attention.q_proj), 
+                           {B, L, model_.num_attention_heads, head_dim_});
+    array keys = reshape(linear_fast(x, layer.attention.k_proj), 
+                        {B, L, model_.num_key_value_heads, head_dim_});
+    array values = reshape(linear_fast(x, layer.attention.v_proj), 
+                          {B, L, model_.num_key_value_heads, head_dim_});
     
     // 2. Q/K Normalization using direct references
     queries = rms_norm_fast(queries, layer.attention.q_norm);

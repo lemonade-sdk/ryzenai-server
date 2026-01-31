@@ -37,6 +37,10 @@ struct LinearWeights {
  * Common structure for Q/K/V/O projections + norms
  */
 struct AttentionWeights {
+    // Fused QKV projection (Phi3 style - single matmul for all projections)
+    LinearWeights qkv_proj;
+    
+    // Separate Q/K/V projections (Qwen3/LLaMA style)
     LinearWeights q_proj;
     LinearWeights k_proj;
     LinearWeights v_proj;
@@ -45,6 +49,9 @@ struct AttentionWeights {
     // Q/K normalization (Qwen2.5/Qwen3 specific, optional for others)
     const array* q_norm = nullptr;
     const array* k_norm = nullptr;
+    
+    // Helper to check if fused QKV is available
+    bool has_fused_qkv() const { return qkv_proj.weight != nullptr; }
 };
 
 
