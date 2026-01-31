@@ -3,9 +3,12 @@
  * 
  * Common types and base classes for MLX inference engines.
  * Defines the abstract interface for model forward passes.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include <memory>
 #include <vector>
@@ -65,3 +68,5 @@ public:
  * based on the model's architecture type.
  */
 std::unique_ptr<BaseInferenceEngine> create_inference_engine(const MlxOgaModel& model);
+
+#endif // USE_MLX

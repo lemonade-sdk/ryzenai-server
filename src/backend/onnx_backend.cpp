@@ -111,9 +111,8 @@ std::vector<int32_t> OnnxBackend::encode(const std::string& text) {
         throw std::runtime_error("Failed to encode: " + error);
     }
     
-    size_t count = 0;
     const int32_t* ids = OgaSequencesGetSequenceData(sequences, 0);
-    OgaSequencesGetSequenceCount(sequences, &count);
+    size_t count = OgaSequencesGetSequenceCount(sequences, 0);
     
     std::vector<int32_t> result_ids(ids, ids + count);
     OgaDestroySequences(sequences);
@@ -241,8 +240,7 @@ std::string OnnxBackend::complete(const std::string& prompt, const GenerationPar
             first_token = false;
         }
         
-        size_t seq_count = 0;
-        OgaGenerator_GetSequenceCount(generator, &seq_count);
+        size_t seq_count = OgaGenerator_GetSequenceCount(generator, 0);
         const int32_t* seq = OgaGenerator_GetSequenceData(generator, 0);
         
         if (seq_count > 0) {
@@ -365,8 +363,7 @@ void OnnxBackend::streamComplete(const std::string& prompt, const GenerationPara
             throw std::runtime_error("Failed to generate token: " + error);
         }
         
-        size_t seq_count = 0;
-        OgaGenerator_GetSequenceCount(generator, &seq_count);
+        size_t seq_count = OgaGenerator_GetSequenceCount(generator, 0);
         const int32_t* seq = OgaGenerator_GetSequenceData(generator, 0);
         int32_t new_token = seq[seq_count - 1];
         
