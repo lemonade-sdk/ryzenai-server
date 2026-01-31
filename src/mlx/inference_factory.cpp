@@ -13,6 +13,7 @@
 #include "ryzenai/mlx/models/phi3_inference.h"
 //#include "ryzenai/mlx/models/phi_inference.h"
 #include "ryzenai/mlx/models/qwen3_inference.h"
+#include "ryzenai/mlx/models/qwen3_moe_inference.h"
 //#include "ryzenai/mlx/models/qwen3_next_inference.h"
 //#include "ryzenai/mlx/models/deepseek_inference.h"
 //#include "ryzenai/mlx/models/mixtral_inference.h"
@@ -52,7 +53,14 @@ std::string detect_model_type(const MlxOgaModel& model) {
                 if (model_type == "gemma") return "gemma";
                 if (model_type == "gemma2") return "gemma2";
                 if (model_type == "llama") return "llama";
-                if (model_type == "qwen3") return "qwen3";
+                if (model_type == "qwen3_moe") return "qwen3_moe";
+                if (model_type == "qwen3") {
+                    // Check if it's MoE variant (has num_experts > 0)
+                    if (config.contains("num_experts") && config["num_experts"].get<int>() > 0) {
+                        return "qwen3_moe";
+                    }
+                    return "qwen3";
+                }
                 if (model_type == "qwen3_next") return "qwen3_next";
                 if (model_type == "qwen2") return "qwen2";
                 if (model_type == "qwen") return "qwen";
@@ -158,6 +166,10 @@ std::unique_ptr<BaseInferenceEngine> create_inference_engine(const MlxOgaModel& 
     }*/
     
     // Qwen family
+    if (model_type == "qwen3_moe") {
+        std::cout << "[InferenceFactory] Using Qwen3 MoE inference" << std::endl;
+        return std::make_unique<Qwen3MoEInference>(model);
+    }
     if (model_type == "qwen3") {
         return std::make_unique<Qwen3Inference>(model);
     }

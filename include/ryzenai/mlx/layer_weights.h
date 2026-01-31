@@ -26,6 +26,10 @@ struct LinearWeights {
     const array* scales = nullptr;   // For quantized models
     const array* biases = nullptr;   // For quantized models (or regular bias)
     
+    // Quantization config (set from model config)
+    int group_size = 64;
+    int bits = 4;
+    
     bool is_quantized() const { return scales != nullptr; }
     bool has_bias() const { return biases != nullptr; }
     bool has_pretransposed() const { return weight_T != nullptr; }

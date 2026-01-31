@@ -32,10 +32,10 @@ void loadAdditionalTokens(MlxOgaModel* model);
 
 /*
  * MlxOgaModel::Create
- * 
- * Loads a model from the specified directory.
+ * * Loads a model from the specified directory.
  * Reads config.json for model parameters and loads weights from safetensors.
  * Automatically detects quantization settings.
+ * * UPDATE: Added support for sharded weights (model-00001-of-XXXX.safetensors)
  */
 std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
     auto model = std::make_unique<MlxOgaModel>();
@@ -48,19 +48,16 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
     std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
 
     if (lower_path.find("qwen") != std::string::npos) {
-        // Qwen models: <|im_end|>=151645 is the chat turn end token
-        // Also add <|endoftext|>=151643 as fallback EOS
         model->eos_token_ids = {151645, 151643};
     } else if (lower_path.find("llama-3") != std::string::npos) {
-        model->eos_token_ids = {128009, 128001}; // <|eot_id|>, <|end_of_text|>
+        model->eos_token_ids = {128009, 128001};
     } else if (lower_path.find("phi-3") != std::string::npos) {
-        model->eos_token_ids = {32007, 32008};  // <|end|>, <|endoftext|>
+        model->eos_token_ids = {32007, 32008};
     } else if (lower_path.find("gemma") != std::string::npos) {
-        model->eos_token_ids = {107, 1};    // <end_of_turn>, <eos>
+        model->eos_token_ids = {107, 1};
     }
 
     // 2. Try to load from config (Overrides heuristic if present)
-    // Prioritize tokenizer_config.json for dynamic EOS token detection
     std::string config_path = model->model_path + "/tokenizer_config.json";
 
     if (fs::exists(config_path)) {
@@ -68,7 +65,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
             std::ifstream f(config_path);
             nlohmann::json j = nlohmann::json::parse(f);
 
-            // Check for eos_token_id directly
             if (j.contains("eos_token_id")) {
                 auto& eos = j["eos_token_id"];
                 if (eos.is_number_integer()) {
@@ -76,41 +72,34 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                 } else if (eos.is_array() && !eos.empty()) {
                     model->eos_token_ids.clear();
                     for (const auto& id : eos) {
-                        if (id.is_number_integer()) {
-                            model->eos_token_ids.push_back(id.get<int>());
-                        }
+                        if (id.is_number_integer()) model->eos_token_ids.push_back(id.get<int>());
                     }
                 }
             }
-
-            // Check for eos_token as string and look up in added_tokens_decoder
+            
+            // Check added_tokens_decoder
             if (j.contains("eos_token") && j["eos_token"].is_string()) {
                 std::string eos_str = j["eos_token"];
                 if (j.contains("added_tokens_decoder") && j["added_tokens_decoder"].is_object()) {
                     for (auto& [key, value] : j["added_tokens_decoder"].items()) {
                         if (value.contains("content") && value["content"] == eos_str) {
                             try {
-                                int id = std::stoi(key);
-                                model->eos_token_ids = {id};
+                                model->eos_token_ids = {std::stoi(key)};
                                 break;
                             } catch(...) {}
                         }
                     }
                 }
             }
-        } catch(...) {
-            // Ignore config errors, rely on heuristic
-        }
+        } catch(...) {}
     }
 
-    // Also check generation_config.json if tokenizer_config didn't override
+    // Check generation_config.json
     config_path = model->model_path + "/generation_config.json";
     if (fs::exists(config_path)) {
         try {
             std::ifstream f(config_path);
             nlohmann::json j = nlohmann::json::parse(f);
-
-            // Check for explicit EOS ID
             if (j.contains("eos_token_id")) {
                 auto& eos = j["eos_token_id"];
                 if (eos.is_number_integer()) {
@@ -118,15 +107,11 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                 } else if (eos.is_array() && !eos.empty()) {
                     model->eos_token_ids.clear();
                     for (const auto& id : eos) {
-                        if (id.is_number_integer()) {
-                            model->eos_token_ids.push_back(id.get<int>());
-                        }
+                        if (id.is_number_integer()) model->eos_token_ids.push_back(id.get<int>());
                     }
                 }
             }
-        } catch(...) {
-            // Ignore config errors, rely on heuristic
-        }
+        } catch(...) {}
     }
 
     std::cout << "[MlxOgaModel] Auto-configured EOS Token IDs: ";
@@ -136,31 +121,41 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
     }
     std::cout << std::endl;
 
+    // Load Model Config
     std::string model_config_path = model->model_path + "/config.json";
     if (fs::exists(model_config_path)) {
         std::ifstream f(model_config_path);
         nlohmann::json config;
         try {
             f >> config;
+            if (config.contains("vocab_size")) model->vocab_size = config["vocab_size"];
+            if (config.contains("hidden_size")) model->hidden_size = config["hidden_size"];
+            if (config.contains("num_attention_heads")) model->num_attention_heads = config["num_attention_heads"];
+            if (config.contains("num_key_value_heads")) model->num_key_value_heads = config["num_key_value_heads"];
+            else model->num_key_value_heads = model->num_attention_heads;
+            if (config.contains("num_hidden_layers")) model->num_hidden_layers = config["num_hidden_layers"];
+            if (config.contains("max_position_embeddings")) model->max_position_embeddings = config["max_position_embeddings"];
+            if (config.contains("intermediate_size")) model->intermediate_size = config["intermediate_size"];
+            if (config.contains("rms_norm_eps")) model->rms_norm_eps = config["rms_norm_eps"];
+            if (config.contains("rope_theta")) model->rope_theta = config["rope_theta"];
+            if (config.contains("head_dim")) model->head_dim = config["head_dim"];
+            else model->head_dim = 0;
+            if (config.contains("model_type")) model->model_type = config["model_type"];
             
-            if (config.contains("vocab_size"))
-                model->vocab_size = config["vocab_size"];
-            if (config.contains("hidden_size"))
-                model->hidden_size = config["hidden_size"];
-            if (config.contains("num_attention_heads"))
-                model->num_attention_heads = config["num_attention_heads"];
-            if (config.contains("num_key_value_heads"))
-                model->num_key_value_heads = config["num_key_value_heads"];
-            else
-                model->num_key_value_heads = model->num_attention_heads;
-            if (config.contains("num_hidden_layers"))
-                model->num_hidden_layers = config["num_hidden_layers"];
-            if (config.contains("max_position_embeddings"))
-                model->max_position_embeddings = config["max_position_embeddings"];
-            if (config.contains("intermediate_size"))
-                model->intermediate_size = config["intermediate_size"];
-            if (config.contains("rms_norm_eps"))
-                model->rms_norm_eps = config["rms_norm_eps"];
+            // MoE-specific configuration
+            if (config.contains("num_experts")) model->num_experts = config["num_experts"];
+            if (config.contains("num_experts_per_tok")) model->num_experts_per_tok = config["num_experts_per_tok"];
+            if (config.contains("decoder_sparse_step")) model->decoder_sparse_step = config["decoder_sparse_step"];
+            if (config.contains("moe_intermediate_size")) model->moe_intermediate_size = config["moe_intermediate_size"];
+            if (config.contains("mlp_only_layers") && config["mlp_only_layers"].is_array()) {
+                for (const auto& layer_idx : config["mlp_only_layers"]) {
+                    if (layer_idx.is_number_integer()) {
+                        model->mlp_only_layers.push_back(layer_idx.get<int>());
+                    }
+                }
+            }
+            
+            // Additional check for EOS in config.json
             if (config.contains("eos_token_id")) {
                 auto& eos = config["eos_token_id"];
                 if (eos.is_number_integer()) {
@@ -168,20 +163,10 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                 } else if (eos.is_array() && !eos.empty()) {
                     model->eos_token_ids.clear();
                     for (const auto& id : eos) {
-                        if (id.is_number_integer()) {
-                            model->eos_token_ids.push_back(id.get<int>());
-                        }
+                        if (id.is_number_integer()) model->eos_token_ids.push_back(id.get<int>());
                     }
                 }
             }
-            if (config.contains("rope_theta"))
-                model->rope_theta = config["rope_theta"];
-            if (config.contains("head_dim"))
-                model->head_dim = config["head_dim"];
-            else
-                model->head_dim = 0;  // Mark as unset for fallback logic
-            if (config.contains("model_type"))
-                model->model_type = config["model_type"];
 
             std::cout << "[Model] Loaded config: vocab_size=" << model->vocab_size
                       << ", hidden_size=" << model->hidden_size
@@ -192,6 +177,25 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                           << ", group_size=" << model->quantization.group_size;
             }
             std::cout << std::endl;
+            
+            // Print MoE-specific configuration if present
+            if (model->num_experts > 0) {
+                std::cout << "[Model] MoE config: num_experts=" << model->num_experts
+                          << ", experts_per_tok=" << model->num_experts_per_tok
+                          << ", decoder_sparse_step=" << model->decoder_sparse_step;
+                if (model->moe_intermediate_size > 0) {
+                    std::cout << ", moe_intermediate_size=" << model->moe_intermediate_size;
+                }
+                if (!model->mlp_only_layers.empty()) {
+                    std::cout << ", mlp_only_layers=[";
+                    for (size_t idx = 0; idx < model->mlp_only_layers.size(); ++idx) {
+                        if (idx > 0) std::cout << ",";
+                        std::cout << model->mlp_only_layers[idx];
+                    }
+                    std::cout << "]";
+                }
+                std::cout << std::endl;
+            }
         } catch (const std::exception& e) {
             std::cerr << "[Model] Config parse error: " << e.what() << std::endl;
         }
@@ -199,93 +203,154 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
         std::cerr << "[Model] config.json not found, using defaults" << std::endl;
     }
 
-    std::string safetensors_path = model->model_path + "/model.safetensors";
-    if (fs::exists(safetensors_path)) {
-        try {
-            std::cout << "[Model] Loading weights from: " << safetensors_path << std::endl;
-
-            auto loaded_data = load_safetensors(safetensors_path);
-            auto& loaded_weights = loaded_data.first;
-
-            for (const auto& [key, value] : loaded_weights) {
-                std::string mlx_key = key;
-
-                std::string final_key = mlx_key;
-                if (final_key.find("model.") == 0) {
-                    final_key = final_key.substr(6);
-                }
-
-                if (final_key.size() > 7 && final_key.substr(final_key.size() - 7) == ".weight") {
-                    std::string without_weight = final_key.substr(0, final_key.size() - 7);
-                    
-                    if (without_weight.size() > 7 && without_weight.substr(without_weight.size() - 7) == ".scales") {
-                        final_key = without_weight;
-                    } else if (without_weight.size() > 7 && without_weight.substr(without_weight.size() - 7) == ".biases") {
-                        final_key = without_weight;
-                    } else if (without_weight.size() > 11 && without_weight.substr(without_weight.size() - 11) == ".zero_point") {
-                        final_key = without_weight;
-                    }
-                }
-
-                model->weights.emplace(final_key, value);
-                std::cout << "[Model] Loaded weight: " << final_key << " shape: " << value.shape() << std::endl;
+    // -------------------------------------------------------------------------
+    // WEIGHT LOADING LOGIC (Fix for Sharded Models)
+    // -------------------------------------------------------------------------
+    std::vector<std::string> weight_files;
+    try {
+        for (const auto& entry : fs::directory_iterator(model->model_path)) {
+            if (entry.path().extension() == ".safetensors") {
+                weight_files.push_back(entry.path().string());
             }
+        }
+        // Sort to ensure deterministic load order
+        std::sort(weight_files.begin(), weight_files.end());
+    } catch (const std::exception& e) {
+        std::cerr << "[Model] Error scanning directory: " << e.what() << std::endl;
+    }
 
-            std::cout << "[Model] Loaded " << loaded_weights.size() << " weight tensors" << std::endl;
+    if (!weight_files.empty()) {
+        try {
+            for (const auto& file_path : weight_files) {
+                std::cout << "[Model] Loading weights from: " << file_path << std::endl;
+                
+                auto loaded_data = load_safetensors(file_path);
+                auto& loaded_weights = loaded_data.first;
+
+                for (const auto& [key, value] : loaded_weights) {
+                    std::string mlx_key = key;
+
+                    // Clean key name logic
+                    std::string final_key = mlx_key;
+                    if (final_key.find("model.") == 0) {
+                        final_key = final_key.substr(6);
+                    }
+
+                    // Key normalization for quantization suffixes
+                    // (Removes .weight from suffixes like .scales.weight if accidentally present)
+                    // The logic below mimics the original code's behavior
+                    if (final_key.size() > 7 && final_key.substr(final_key.size() - 7) == ".weight") {
+                        std::string without_weight = final_key.substr(0, final_key.size() - 7);
+                        if (without_weight.size() > 7 && without_weight.substr(without_weight.size() - 7) == ".scales") {
+                            final_key = without_weight;
+                        } else if (without_weight.size() > 7 && without_weight.substr(without_weight.size() - 7) == ".biases") {
+                            final_key = without_weight;
+                        } else if (without_weight.size() > 11 && without_weight.substr(without_weight.size() - 11) == ".zero_point") {
+                            final_key = without_weight;
+                        }
+                    }
+
+                    // MoE weight key normalization
+                    // HuggingFace Qwen3 MoE uses: layers.X.mlp.experts.Y.gate_proj.weight
+                    // Our code expects: layers.X.mlp.switch_mlp.gate_proj.weight (stacked)
+                    // We need to handle expert weights specially - they may come as individual
+                    // experts or already stacked as switch_mlp format
+                    // Note: The actual stacking is done in qwen3_moe_inference.cpp cache_weights()
+
+                    model->weights.emplace(final_key, value);
+                }
+            }
+            std::cout << "[Model] Successfully loaded " << model->weights.size() << " tensors from " << weight_files.size() << " file(s)" << std::endl;
 
         } catch (const std::exception& e) {
             std::cerr << "[Model] Safetensors load error: " << e.what() << std::endl;
-            std::cerr << "[Model] Using dummy weights" << std::endl;
-
-            model->weights.emplace("embed_tokens.weight", random::normal({model->vocab_size, model->hidden_size}, 0.0f, 0.02f));
-            model->weights.emplace("lm_head.weight", random::normal({model->vocab_size, model->hidden_size}, 0.0f, 0.02f));
-
-            for (int i = 0; i < model->num_hidden_layers; ++i) {
-                std::string prefix = "model.layers." + std::to_string(i) + ".";
-                model->weights.emplace(prefix + "input_layernorm.weight", ones({model->hidden_size}));
-                model->weights.emplace(prefix + "post_attention_layernorm.weight", ones({model->hidden_size}));
-
-                model->weights.emplace(prefix + "self_attn.q_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "self_attn.k_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "self_attn.v_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "self_attn.o_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
-
-                model->weights.emplace(prefix + "mlp.gate_proj.weight", random::normal({model->hidden_size, 4 * model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "mlp.up_proj.weight", random::normal({model->hidden_size, 4 * model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "mlp.down_proj.weight", random::normal({4 * model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
+            // Only fall back to dummy weights if NO weights were loaded successfully
+            if (model->weights.empty()) {
+                goto create_dummy;
             }
-
-            model->weights.emplace("model.norm.weight", ones({model->hidden_size}));
-            std::cout << "[Model] Created dummy weights for " << model->num_hidden_layers << " layers" << std::endl;
         }
     } else {
-        std::cerr << "[Model] model.safetensors not found, creating dummy weights" << std::endl;
+        std::cerr << "[Model] No .safetensors files found in " << model->model_path << std::endl;
+        goto create_dummy;
+    }
 
+    // Skip dummy creation if weights loaded
+    goto load_tokens;
+
+create_dummy:
+    {
+        std::cerr << "[Model] Creating dummy weights (Warning: Output will be garbage)" << std::endl;
         model->weights.emplace("embed_tokens.weight", random::normal({model->vocab_size, model->hidden_size}, 0.0f, 0.02f));
         model->weights.emplace("lm_head.weight", random::normal({model->vocab_size, model->hidden_size}, 0.0f, 0.02f));
+        model->weights.emplace("model.norm.weight", ones({model->hidden_size}));
+
+        // Determine if this is an MoE model
+        bool is_moe_model = model->num_experts > 0;
+        int moe_intermediate = model->moe_intermediate_size > 0 ? model->moe_intermediate_size : model->intermediate_size;
+        int dense_intermediate = model->intermediate_size > 0 ? model->intermediate_size : 4 * model->hidden_size;
+        
+        // Helper to check if a layer is MoE (based on decoder_sparse_step and mlp_only_layers)
+        auto is_moe_layer = [&](int layer_idx) -> bool {
+            if (!is_moe_model) return false;
+            // Check if in mlp_only_layers
+            for (int idx : model->mlp_only_layers) {
+                if (idx == layer_idx) return false;
+            }
+            // Check decoder_sparse_step
+            return (layer_idx + 1) % model->decoder_sparse_step == 0;
+        };
 
         for (int i = 0; i < model->num_hidden_layers; ++i) {
-            std::string prefix = "model.layers." + std::to_string(i) + ".";
+            std::string prefix = "layers." + std::to_string(i) + ".";
             model->weights.emplace(prefix + "input_layernorm.weight", ones({model->hidden_size}));
             model->weights.emplace(prefix + "post_attention_layernorm.weight", ones({model->hidden_size}));
-
+            
+            // Attention (with Q/K norm for Qwen3)
             model->weights.emplace(prefix + "self_attn.q_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
             model->weights.emplace(prefix + "self_attn.k_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
             model->weights.emplace(prefix + "self_attn.v_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
             model->weights.emplace(prefix + "self_attn.o_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
+            
+            // Q/K norm weights for Qwen3 MoE
+            int head_dim = model->head_dim > 0 ? model->head_dim : model->hidden_size / model->num_attention_heads;
+            model->weights.emplace(prefix + "self_attn.q_norm.weight", ones({head_dim}));
+            model->weights.emplace(prefix + "self_attn.k_norm.weight", ones({head_dim}));
 
-            model->weights.emplace(prefix + "mlp.gate_proj.weight", random::normal({model->hidden_size, 4 * model->hidden_size}, 0.0f, 0.02f));
-            model->weights.emplace(prefix + "mlp.up_proj.weight", random::normal({model->hidden_size, 4 * model->hidden_size}, 0.0f, 0.02f));
-            model->weights.emplace(prefix + "mlp.down_proj.weight", random::normal({4 * model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
+            if (is_moe_layer(i)) {
+                // MoE Layer: Create router and expert weights
+                // Router weight: [hidden_size, num_experts]
+                model->weights.emplace(prefix + "mlp.gate.weight", 
+                    random::normal({model->num_experts, model->hidden_size}, 0.0f, 0.02f));
+                
+                // Expert weights (stacked): [num_experts, out_dim, in_dim]
+                // switch_mlp format for SwitchGLU
+                model->weights.emplace(prefix + "mlp.switch_mlp.gate_proj.weight", 
+                    random::normal({model->num_experts, moe_intermediate, model->hidden_size}, 0.0f, 0.02f));
+                model->weights.emplace(prefix + "mlp.switch_mlp.up_proj.weight", 
+                    random::normal({model->num_experts, moe_intermediate, model->hidden_size}, 0.0f, 0.02f));
+                model->weights.emplace(prefix + "mlp.switch_mlp.down_proj.weight", 
+                    random::normal({model->num_experts, model->hidden_size, moe_intermediate}, 0.0f, 0.02f));
+            } else {
+                // Dense MLP Layer
+                model->weights.emplace(prefix + "mlp.gate_proj.weight", 
+                    random::normal({dense_intermediate, model->hidden_size}, 0.0f, 0.02f));
+                model->weights.emplace(prefix + "mlp.up_proj.weight", 
+                    random::normal({dense_intermediate, model->hidden_size}, 0.0f, 0.02f));
+                model->weights.emplace(prefix + "mlp.down_proj.weight", 
+                    random::normal({model->hidden_size, dense_intermediate}, 0.0f, 0.02f));
+            }
         }
-
-        model->weights.emplace("model.norm.weight", ones({model->hidden_size}));
-        std::cout << "[Model] Created dummy weights for " << model->num_hidden_layers << " layers" << std::endl;
+        
+        if (is_moe_model) {
+            std::cout << "[Model] Created dummy MoE weights for " << model->num_hidden_layers 
+                      << " layers (" << model->num_experts << " experts)" << std::endl;
+        } else {
+            std::cout << "[Model] Created dummy weights for " << model->num_hidden_layers << " layers" << std::endl;
+        }
     }
 
-    // Load additional special tokens for streaming detection
+load_tokens:
     loadAdditionalTokens(model.get());
-
     return model;
 }
 

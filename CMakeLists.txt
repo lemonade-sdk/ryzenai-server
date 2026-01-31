@@ -145,6 +145,7 @@ set(MODEL_SOURCES
     
     # Qwen family
     src/mlx/models/qwen3_inference.cpp
+    src/mlx/models/qwen3_moe_inference.cpp
     #src/mlx/models/qwen3_next_inference.cpp
     
     # Deepseek family
@@ -163,6 +164,7 @@ set(MLX_CORE_SOURCES
     src/mlx/quantization.cpp
     src/mlx/inference_factory.cpp
     src/mlx/tokenizer.cpp
+    src/mlx/moe.cpp
 )
 
 # Backend abstraction sources (conditional compilation)

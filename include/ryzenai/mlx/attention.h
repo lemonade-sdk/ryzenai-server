@@ -16,6 +16,40 @@
 namespace ryzenai {
 namespace mlx {
 
+namespace traits {
+    // Helper to detect if type T has member 'scales'
+    template <typename T, typename = void>
+    struct has_scales : std::false_type {};
+
+    template <typename T>
+    struct has_scales<T, std::void_t<decltype(T::scales)>> : std::true_type {};
+
+    // Helper to detect if type T has member 'biases'
+    template <typename T, typename = void>
+    struct has_biases : std::false_type {};
+
+    template <typename T>
+    struct has_biases<T, std::void_t<decltype(T::biases)>> : std::true_type {};
+
+    // Helper to detect if type T has member 'weight_T'
+    template <typename T, typename = void>
+    struct has_weight_T : std::false_type {};
+
+    template <typename T>
+    struct has_weight_T<T, std::void_t<decltype(T::weight_T)>> : std::true_type {};
+    
+    // Helper to detect group_size/bits
+    template <typename T, typename = void>
+    struct has_group_size : std::false_type {};
+    template <typename T>
+    struct has_group_size<T, std::void_t<decltype(T::group_size)>> : std::true_type {};
+    
+    template <typename T, typename = void>
+    struct has_bits : std::false_type {};
+    template <typename T>
+    struct has_bits<T, std::void_t<decltype(T::bits)>> : std::true_type {};
+}
+
 /**
  * Attention utilities
  */
@@ -83,6 +117,172 @@ public:
             std::nullopt, // no explicit mask array
             std::nullopt  // sinks
         );
+    }
+
+    /**
+     * Generic Linear Forward.
+     * Handles both Quantized and Standard weights via Duck Typing.
+     * Expects 'w' to have: .weight, .scales (optional), .biases (optional), .group_size/bits (if quantized)
+     */
+    template<typename LinearWeightsT>
+    static ::mlx::core::array linear_forward(const ::mlx::core::array& x, const LinearWeightsT& w) {
+        using namespace ::mlx::core;
+        // Detect quantization by checking if 'scales' member exists and is not null
+        bool is_quant = false;
+        if constexpr (traits::has_scales<LinearWeightsT>::value) {
+            if (w.scales != nullptr) is_quant = true;
+        }
+
+        if (is_quant) {
+            // Quantized Path
+             int group_size = 64; 
+             int bits = 4;
+             
+             if constexpr (traits::has_group_size<LinearWeightsT>::value) group_size = w.group_size;
+             if constexpr (traits::has_bits<LinearWeightsT>::value) bits = w.bits;
+             
+             std::optional<array> bias_opt = std::nullopt;
+             if constexpr (traits::has_biases<LinearWeightsT>::value) { 
+                 if(w.biases != nullptr) bias_opt = *w.biases; 
+             }
+
+             return quantized_matmul(
+                x, *w.weight, *w.scales, bias_opt,
+                true, group_size, bits 
+             );
+        } else {
+            // Standard Path
+            array W = *w.weight;
+            
+            // Check for pre-transposed weight
+            if constexpr (traits::has_weight_T<LinearWeightsT>::value) {
+                if (w.weight_T != nullptr) W = *w.weight_T;
+                else if (W.shape(-1) == x.shape(-1)) W = transpose(W, {1, 0});
+            } else {
+                 if (W.shape(-1) == x.shape(-1)) W = transpose(W, {1, 0});
+            }
+            
+            array out = matmul(x, W);
+            
+            if constexpr (traits::has_biases<LinearWeightsT>::value) {
+                if (w.biases != nullptr) out = out + *w.biases;
+            }
+            return out;
+        }
+    }
+
+    /**
+     * Full Self-Attention Implementation.
+     * 
+     * * Handles:
+     * 1. QKV Projection (Fused)
+     * 2. Q/K Normalization (Specific to Qwen/Cohere)
+     * 3. RoPE (Rotary Positional Embeddings)
+     * 4. KV Cache Management
+     * 5. Scaled Dot Product Attention
+     * 6. Output Projection
+     * * @tparam LayerT Type of the layer weights struct (Qwen3MoELayerWeights)
+     */
+    template<typename LayerT>
+    static ::mlx::core::array self_attention_fast_impl(
+        const ::mlx::core::array& x,
+        const LayerT& layer,
+        int layer_idx,
+        const std::string& mask_type,
+        std::vector<::mlx::core::array>& k_cache,
+        std::vector<::mlx::core::array>& v_cache,
+        int cache_pos,
+        int max_cache_len,
+        int head_dim,
+        float rope_theta,
+        float scale,
+        int num_heads,
+        int num_kv_heads
+    ) {
+        using namespace ::mlx::core;
+        int B = x.shape(0);
+        int L = x.shape(1);
+        int q_size = num_heads * head_dim;
+        int kv_size = num_kv_heads * head_dim;
+
+        // 1. Fused QKV Projection
+        // Uses the helper to handle potential quantization automatically
+        ::mlx::core::array qkv = linear_forward(x, layer.attention.qkv_proj);
+
+        // 2. Split Q, K, V
+        array queries = reshape(slice(qkv, {0, 0, 0}, {B, L, q_size}), 
+                               {B, L, num_heads, head_dim});
+        array keys = reshape(slice(qkv, {0, 0, q_size}, {B, L, q_size + kv_size}), 
+                            {B, L, num_kv_heads, head_dim});
+        array values = reshape(slice(qkv, {0, 0, q_size + kv_size}, {B, L, q_size + 2 * kv_size}), 
+                              {B, L, num_kv_heads, head_dim});
+
+        // 3. Q/K Normalization (Qwen-specific)
+        // Checks if q_norm/k_norm pointers exist and applies them
+        if (layer.attention.q_norm) {
+            queries = fast::rms_norm(queries, *layer.attention.q_norm, 1e-6f);
+        }
+        if (layer.attention.k_norm) {
+            keys = fast::rms_norm(keys, *layer.attention.k_norm, 1e-6f);
+        }
+
+        // 4. RoPE
+        // Prepare for RoPE (needs [B, H, L, D])
+        array q_roped = transpose(queries, {0, 2, 1, 3});
+        array k_roped = transpose(keys, {0, 2, 1, 3});
+        
+        q_roped = fast::rope(q_roped, head_dim, false, rope_theta, 1.0f, cache_pos);
+        k_roped = fast::rope(k_roped, head_dim, false, rope_theta, 1.0f, cache_pos);
+
+        // 5. KV Cache Update
+        // Concatenate new keys/values with cached ones
+        array full_k = k_roped;
+        array full_v = transpose(values, {0, 2, 1, 3}); // [B, H_kv, L, D]
+
+        if (cache_pos > 0) {
+            // Retrieve existing cache
+            array past_k = k_cache[layer_idx];
+            array past_v = v_cache[layer_idx];
+            
+            // Slice valid part if needed (simplification: assume cache is pre-filled or we append)
+            // Ideally, we write into the cache buffer.
+            // For MLX, we often just concat or update slice.
+            
+            // Simple append logic for inference
+            if (cache_pos + L <= max_cache_len) {
+                 // Write update logic here or just concat if we treat cache as growing array
+                 // For efficiency in MLX, we usually concat with slice of past
+                 // Here we assume k_cache grows or we take the relevant slice:
+                 array k_past_slice = slice(past_k, {0,0,0,0}, {past_k.shape(0), past_k.shape(1), cache_pos, past_k.shape(3)});
+                 array v_past_slice = slice(past_v, {0,0,0,0}, {past_v.shape(0), past_v.shape(1), cache_pos, past_v.shape(3)});
+                 full_k = concatenate({k_past_slice, full_k}, 2);
+                 full_v = concatenate({v_past_slice, full_v}, 2);
+            }
+        }
+        
+        // Update generic cache storage (copy)
+        // In a real optimized engine, we'd write to a pre-allocated buffer in-place
+        // but for functional correctness here:
+        k_cache[layer_idx] = full_k; 
+        v_cache[layer_idx] = full_v;
+
+        // 6. Attention (SDPA)
+        array output = 
+        (
+            mask_type == "none" ?
+            fast::scaled_dot_product_attention(q_roped, full_k, full_v, scale) : 
+            (
+                mask_type == "causal" ?
+                fast::scaled_dot_product_attention(q_roped, full_k, full_v, scale, "causal") :
+                fast::scaled_dot_product_attention(q_roped, full_k, full_v, scale, "causal")
+            )
+        );
+
+        // 7. Output Projection
+        output = transpose(output, {0, 2, 1, 3});
+        output = reshape(output, {B, L, q_size});
+        
+        return linear_forward(output, layer.attention.o_proj);
     }
     
     /**

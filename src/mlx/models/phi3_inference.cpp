@@ -448,6 +448,8 @@ void Phi3Inference::setup_weight_references() {
         lw.weight = get_weight(prefix + ".weight");
         lw.scales = get_weight(prefix + ".scales");
         lw.biases = get_weight(prefix + ".biases");
+        lw.group_size = model_.quantization.group_size;
+        lw.bits = model_.quantization.bits;
         return lw;
     };
     

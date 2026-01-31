@@ -45,6 +45,9 @@ struct MlxOgaModel {
     int sliding_window = 0;  // 0 means no sliding window
     int num_experts = 0;  // For MoE models
     int num_experts_per_tok = 0;  // For MoE models
+    int decoder_sparse_step = 1;  // For MoE models: frequency of MoE layers
+    int moe_intermediate_size = 0;  // For MoE models: expert hidden dim (0 = use intermediate_size)
+    std::vector<int> mlp_only_layers;  // For MoE models: indices of dense MLP layers
     std::string model_type = "";
     
     // Context length (passed from command line or config)

@@ -214,6 +214,9 @@ std::string InferenceEngine::loadModel(const std::string& model_path, BackendTyp
     
     auto backend = BackendRegistry::instance().create(actual_type, resolved_path);
     
+    // Apply context size from optimization settings
+    backend->setContextSize(opt_settings_.ctx_size);
+    
     // Create LoadedModel entry
     LoadedModel loaded;
     loaded.backend = std::move(backend);

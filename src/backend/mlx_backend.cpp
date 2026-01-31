@@ -54,6 +54,13 @@ void MlxBackend::loadModel(const std::string& model_path) {
     std::cout << "[MlxBackend] Layers: " << model_->num_hidden_layers << std::endl;
 }
 
+void MlxBackend::setContextSize(int ctx_size) {
+    if (model_) {
+        model_->max_context_length = ctx_size;
+        std::cout << "[MlxBackend] Context size set to: " << ctx_size << " tokens" << std::endl;
+    }
+}
+
 std::string MlxBackend::getName() const {
     switch (type_) {
         case BackendType::MLX_METAL: return "MLX-Metal";

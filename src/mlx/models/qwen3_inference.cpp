@@ -490,6 +490,8 @@ void Qwen3Inference::setup_weight_references() {
         lw.weight_T = get_weight(prefix + ".weight_T");  // Pre-transposed (non-quantized only)
         lw.scales = get_weight(prefix + ".scales");
         lw.biases = get_weight(prefix + ".biases");
+        lw.group_size = model_.quantization.group_size;
+        lw.bits = model_.quantization.bits;
         return lw;
     };
     
