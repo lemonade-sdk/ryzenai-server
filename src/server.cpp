@@ -572,7 +572,11 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             };
             if (!reasoning.empty()) message["reasoning_content"] = reasoning;
             if (!tool_calls_json.is_null()) message["tool_calls"] = tool_calls_json;
-            
+
+            int prompt_tokens = inference_engine_->countTokens(requested_model, prompt);
+            double tps = timing.token_count / (timing.total_time_ms / 1000.0);
+            double ttft = timing.total_time_ms; // Placeholder for time to first token
+
             json response = {
                 {"id", "chatcmpl-" + std::to_string(std::time(nullptr))},
                 {"object", "chat.completion"},
@@ -584,10 +588,12 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                     {"finish_reason", "stop"}
                 }}},
                 {"usage", {
-                    {"prompt_tokens", inference_engine_->countTokens(requested_model, prompt)},
+                    {"prompt_tokens", prompt_tokens},
                     {"completion_tokens", timing.token_count},
                     {"total_tokens", timing.token_count},
-                    {"completion_time_ms", timing.total_time_ms}
+                    {"completion_time_ms", timing.total_time_ms},
+                    {"tps", tps},
+                    {"ttft", ttft}
                 }}
             };
             res.set_content(response.dump(), "application/json");
