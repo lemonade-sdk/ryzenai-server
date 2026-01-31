@@ -18,8 +18,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include <vector>
 #include <utility>
 #include <cmath>
@@ -358,5 +356,3 @@ private:
 };
 
 } // namespace ryzenai::mlx
-
-#endif // USE_MLX

@@ -8,8 +8,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/quantization.h"
 #include "ryzenai/types.h"
@@ -107,5 +105,3 @@ struct MlxOgaModel {
      */
     std::vector<std::string> GetStopSequences() const;
 };
-
-#endif // USE_MLX

@@ -7,8 +7,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include <string>
 #include <vector>
 #include <memory>
@@ -61,5 +59,3 @@ private:
     std::string accumulated;
     std::string decoded_buffer;
 };
-
-#endif // USE_MLX

@@ -10,8 +10,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include <mlx/mlx.h>
 #include <optional>
 #include <vector>
@@ -154,5 +152,3 @@ array swiglu(const array& gate, const array& up);
 
 }  // namespace moe
 }  // namespace ryzenai
-
-#endif // USE_MLX

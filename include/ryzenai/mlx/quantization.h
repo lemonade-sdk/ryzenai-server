@@ -8,8 +8,6 @@
  * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
-#ifdef USE_MLX
-
 #include "ryzenai/mlx/common.h"
 #include <unordered_map>
 #include <string>
@@ -92,5 +90,3 @@ array dequantize_weight(const array& quantized_weight, const array& scales,
 array apply_quantization(const array& weight, const std::string& base_name,
                          const std::unordered_map<std::string, array>& weights,
                          const QuantizationConfig& config = QuantizationConfig());
-
-#endif // USE_MLX

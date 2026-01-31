@@ -20,8 +20,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
 #include "ryzenai/mlx/generator.h"
@@ -190,5 +188,3 @@ private:
      */
     void initialize_moe_layer_lazy(int layer_idx);
 };
-
-#endif // USE_MLX

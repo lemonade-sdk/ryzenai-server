@@ -9,8 +9,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include <mlx/mlx.h>
 #include <mlx/fast.h>
 #include <optional>
@@ -393,5 +391,3 @@ public:
 
 } // namespace mlx
 } // namespace ryzenai
-
-#endif // USE_MLX

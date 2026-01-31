@@ -20,8 +20,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
 #include "ryzenai/mlx/generator.h"
@@ -183,5 +181,3 @@ private:
      */
     void setup_weight_references();
 };
-
-#endif // USE_MLX

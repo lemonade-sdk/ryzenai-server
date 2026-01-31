@@ -8,8 +8,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include <memory>
 #include <vector>
 #include <string>
@@ -68,5 +66,3 @@ public:
  * based on the model's architecture type.
  */
 std::unique_ptr<BaseInferenceEngine> create_inference_engine(const MlxOgaModel& model);
-
-#endif // USE_MLX

@@ -8,11 +8,7 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
 #include "ryzenai/mlx/tokenizer.h"
 #include "ryzenai/mlx/generator.h"
-
-#endif // USE_MLX

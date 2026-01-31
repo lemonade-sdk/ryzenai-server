@@ -10,8 +10,6 @@
 
 #pragma once
 
-#ifdef USE_MLX
-
 #include <vector>
 #include <mlx/array.h>
 
@@ -118,5 +116,3 @@ struct ModelWeights {
 };
 
 } // namespace ryzenai::mlx
-
-#endif // USE_MLX
