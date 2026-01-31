@@ -44,6 +44,15 @@ public:
      * Implements sampling strategy (greedy, temperature, etc.).
      */
     virtual int sample_token(const array& logits, const OgaGeneratorParams& params) = 0;
+    
+    /*
+     * supports_kv_cache
+     * Returns true if the engine supports incremental decoding with KV cache.
+     * If true, GenerateNextToken can pass only the last token during decode.
+     * If false, all tokens must be passed on every forward call.
+     * Default: false (safe fallback - always send all tokens)
+     */
+    virtual bool supports_kv_cache() const { return false; }
 };
 
 

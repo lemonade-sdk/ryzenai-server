@@ -59,6 +59,26 @@ CommandLineArgs CommandLineParser::parse(int argc, char* argv[]) {
         else if (arg == "--verbose" || arg == "-v") {
             args.verbose = true;
         }
+        else if (arg == "--rep-lookback") {
+            if (i + 1 < argc) {
+                args.repetition_lookback = std::stoi(argv[++i]);
+            } else {
+                throw std::runtime_error("Missing value for --rep-lookback");
+            }
+        }
+        else if (arg == "--kv-cache") {
+            args.kv_cache = true;
+        }
+        else if (arg == "--no-kv-cache") {
+            args.kv_cache = false;
+        }
+        else if (arg == "--prefill-chunk") {
+            if (i + 1 < argc) {
+                args.prefill_chunk = std::stoi(argv[++i]);
+            } else {
+                throw std::runtime_error("Missing value for --prefill-chunk");
+            }
+        }
         else if (arg == "-h" || arg == "--help") {
             printUsage(argv[0]);
             exit(0);
@@ -75,20 +95,26 @@ void CommandLineParser::printUsage(const char* program_name) {
     std::cout << "Ryzen AI LLM Server - OpenAI API compatible server for NPU/Hybrid/CPU execution\n\n";
     std::cout << "Usage: " << program_name << " -m MODEL_PATH [OPTIONS]\n\n";
     std::cout << "Required Arguments:\n";
-    std::cout << "  -m, --model PATH          Path to ONNX model directory\n\n";
-    std::cout << "Optional Arguments:\n";
+    std::cout << "  -m, --model PATH          Path to model directory\n\n";
+    std::cout << "Server Options:\n";
     std::cout << "  --host HOST               Host to bind to (default: 127.0.0.1)\n";
     std::cout << "  -p, --port PORT           Port to listen on (default: 8080)\n";
     std::cout << "  --mode MODE               Execution mode: npu|hybrid|cpu (default: hybrid)\n";
-    std::cout << "  -c, --ctx-size SIZE       Context size (default: 2048)\n";
     std::cout << "  -t, --threads NUM         Number of threads (default: 4)\n";
-    std::cout << "  -v, --verbose             Enable verbose output\n";
+    std::cout << "  -v, --verbose             Enable verbose output\n\n";
+    std::cout << "Model Options:\n";
+    std::cout << "  -c, --ctx-size SIZE       Maximum context size (default: 2048)\n\n";
+    std::cout << "Optimization Options:\n";
+    std::cout << "  --rep-lookback NUM        Repetition penalty lookback tokens (default: 64)\n";
+    std::cout << "  --kv-cache                Enable KV cache (default: enabled)\n";
+    std::cout << "  --no-kv-cache             Disable KV cache (slower but uses less memory)\n";
+    std::cout << "  --prefill-chunk SIZE      Chunk size for long prompt prefill (default: 512)\n\n";
+    std::cout << "Other:\n";
     std::cout << "  -h, --help                Show this help message\n\n";
     std::cout << "Examples:\n";
-    std::cout << "  " << program_name << " -m C:\\models\\phi-3-mini-4k-instruct-onnx\n";
-    std::cout << "  " << program_name << " -m C:\\models\\llama-2-7b-onnx --mode hybrid --port 8081\n";
-    std::cout << "  " << program_name << " -m C:\\models\\qwen-onnx --mode npu --verbose\n\n";
-    std::cout << "For more information, visit: https://ryzenai.docs.amd.com\n";
+    std::cout << "  " << program_name << " -m ./models/phi-3-mini-4k-instruct\n";
+    std::cout << "  " << program_name << " -m ./models/qwen3-0.6b --ctx-size 4096 --rep-lookback 128\n";
+    std::cout << "  " << program_name << " -m ./models/llama --no-kv-cache --verbose\n\n";
 }
 
 } // namespace ryzenai

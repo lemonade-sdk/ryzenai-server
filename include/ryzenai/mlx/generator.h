@@ -28,6 +28,8 @@ struct OgaGeneratorParams {
     float repetition_penalty = 1.0f;
     bool do_sample = true;
     double random_seed = 0.0;
+    int eos_token_id = 2;  // Default EOS token ID
+    int pad_token_id = 2;  // Default pad token ID
 
     static std::unique_ptr<OgaGeneratorParams> Create(const OgaModel& model);
 
@@ -50,6 +52,11 @@ struct OgaGenerator {
     std::vector<int32_t> current_tokens;
     bool done = false;
     std::unique_ptr<BaseInferenceEngine> inference_engine;
+
+    // For stop sequence detection
+    size_t input_token_count = 0;
+    std::string accumulated_text;
+    std::vector<std::string> stop_sequences;
 
     /*
      * Create

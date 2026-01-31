@@ -11,6 +11,27 @@
 #include "ryzenai/mlx/quantization.h"
 #include <unordered_map>
 #include <string>
+#include <vector>
+
+// Enum for special token types used in streaming detection
+enum class SpecialTokenType {
+    THINKING_START,
+    THINKING_END,
+    TOOL_CALL_START,
+    TOOL_CALL_END,
+    TOOL_RESPONSE_START,
+    TOOL_RESPONSE_END,
+    CHAT_START,
+    CHAT_END,
+    UNKNOWN
+};
+
+// Struct to store additional special tokens with their types
+struct AdditionalToken {
+    std::string content;
+    SpecialTokenType type;
+    int32_t token_id = -1; // Token ID if available, -1 if not
+};
 
 
 /*
@@ -21,7 +42,7 @@
  */
 struct OgaModel {
     std::string model_path;
-    int eos_token_id = 2;
+    std::vector<int32_t> eos_token_ids = {2};
     int vocab_size = 32000;
     int hidden_size = 4096;
     int num_attention_heads = 32;
@@ -29,9 +50,23 @@ struct OgaModel {
     int num_hidden_layers = 32;
     int max_position_embeddings = 4096;
     int intermediate_size = 11008;
+    int head_dim = 0;  // 0 means compute from hidden_size/num_attention_heads
     float rms_norm_eps = 1e-5f;
     float rope_theta = 10000.0f;
+    bool tie_word_embeddings = true;
+    bool attention_bias = false;
+    bool mlp_bias = false;
+    int sliding_window = 0;  // 0 means no sliding window
+    int num_experts = 0;  // For MoE models
+    int num_experts_per_tok = 0;  // For MoE models
     std::string model_type = "";
+    
+    // Context length (passed from command line or config)
+    // Used to limit KV cache memory usage
+    int max_context_length = 2048;
+
+    // Additional special tokens for streaming detection
+    std::vector<AdditionalToken> additional_tags;
 
     QuantizationConfig quantization;
     std::unordered_map<std::string, array> weights;
@@ -54,4 +89,25 @@ struct OgaModel {
      * Returns the hidden dimension size.
      */
     int get_actual_hidden_size() const { return hidden_size; }
+
+    /*
+     * GetEosId
+     * Returns the primary EOS token ID for this model (for backward compatibility).
+     */
+    int32_t GetEosId() const { return eos_token_ids.empty() ? 2 : eos_token_ids[0]; }
+
+    /*
+     * IsEos
+     * Returns true if the given token ID is an EOS token for this model.
+     */
+    bool IsEos(int32_t token_id) const {
+        return std::find(eos_token_ids.begin(), eos_token_ids.end(), token_id) != eos_token_ids.end();
+    }
+
+    /*
+     * GetStopSequences
+     * Returns a list of string stop sequences for this model.
+     * Used to detect when generation should stop even if the EOS token ID is not generated.
+     */
+    std::vector<std::string> GetStopSequences() const;
 };

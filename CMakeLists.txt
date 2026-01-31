@@ -134,8 +134,39 @@ if(NOT EXISTS "${JSON_DIR}/json.hpp")
     )
 endif()
 
-# Source files
-set(SOURCES
+# Model inference sources (organized by architecture family)
+set(MODEL_SOURCES
+    # Phi family
+    src/mlx/models/phi3_inference.cpp
+    #src/mlx/models/phi_inference.cpp
+    
+    # Gemma family
+    #src/mlx/models/gemma_inference.cpp
+    
+    # Qwen family
+    src/mlx/models/qwen3_inference.cpp
+    #src/mlx/models/qwen3_next_inference.cpp
+    
+    # Deepseek family
+    #src/mlx/models/deepseek_inference.cpp
+    
+    # Llama-based (base for many models)
+    #src/mlx/models/llama_inference.cpp
+    
+    # MoE models
+    #src/mlx/models/mixtral_inference.cpp
+)
+
+# MLX core sources
+set(MLX_CORE_SOURCES
+    src/mlx/mlx_oga.cpp
+    src/mlx/quantization.cpp
+    src/mlx/inference_factory.cpp
+    src/mlx/tokenizer.cpp
+)
+
+# Core application sources
+set(CORE_SOURCES
     src/main.cpp
     src/server.cpp
     src/inference_engine.cpp
@@ -144,12 +175,13 @@ set(SOURCES
     src/tool_calls.cpp
     src/reasoning.cpp
     src/driver_check.cpp
-    src/mlx/mlx_oga.cpp
-    src/mlx/quantization.cpp
-    src/mlx/gemma_inference.cpp
-    src/mlx/phi3_inference.cpp
-    src/mlx/inference_factory.cpp
-    src/mlx/tokenizer.cpp
+)
+
+# Combine all sources
+set(SOURCES
+    ${CORE_SOURCES}
+    ${MLX_CORE_SOURCES}
+    ${MODEL_SOURCES}
 )
 
 # SentencePiece is header-only for our use case

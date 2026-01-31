@@ -1,6 +1,7 @@
 #pragma once
 
 #include "types.h"
+#include "mlx/model.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -23,9 +24,18 @@ struct CompletionTimingData {
     double total_time_ms = 0.0;    // Total completion time in milliseconds
 };
 
+// Optimization settings passed from command line
+struct OptimizationSettings {
+    int ctx_size = 2048;              // --ctx-size
+    int repetition_lookback = 64;     // --rep-lookback
+    bool kv_cache = true;             // --kv-cache / --no-kv-cache
+    int prefill_chunk = 512;          // --prefill-chunk
+};
+
 class InferenceEngine {
 public:
-    InferenceEngine(const std::string& model_path, const std::string& mode);
+    InferenceEngine(const std::string& model_path, const std::string& mode, 
+                   const OptimizationSettings& opt = OptimizationSettings());
     ~InferenceEngine();
     
     // Synchronous completion
@@ -51,6 +61,9 @@ public:
     
     // Token counting
     int countTokens(const std::string& text);
+
+    // Get additional special tokens for streaming detection
+    const std::vector<AdditionalToken>& getAdditionalTags() const;
     
 private:
     void loadModel();
@@ -70,10 +83,15 @@ private:
     std::string ryzenai_version_;
     std::string chat_template_;  // Chat template from tokenizer_config.json
     int max_prompt_length_ = 2048;  // Default, overridden by rai_config.json
+    int ctx_size_ = 2048;  // Context size for KV cache (from --ctx-size)
     
     // Default generation params from genai_config.json search section
     GenerationParams default_params_;
     bool has_search_config_ = false;
+    
+    // Fallback additional tokens for non-MLX backends (Onyx)
+    // For MLX, we use model_->additional_tags directly
+    std::vector<AdditionalToken> fallback_additional_tags_;
     
     std::mutex inference_mutex_;  // Protect inference operations
 };

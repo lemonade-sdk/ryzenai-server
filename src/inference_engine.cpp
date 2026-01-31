@@ -5,24 +5,28 @@
 #elif MLX_ON
 //MacOS Specific Enablement
 #include "ryzenai/mlx/mlx_oga.h"
-#include "ryzenai/mlx/gemma_inference.h"
 #endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <cstdlib>
-#include <thread>
 #include <chrono>
 
 namespace ryzenai {
 
 namespace fs = std::filesystem;
 
-InferenceEngine::InferenceEngine(const std::string& model_path, const std::string& mode)
-    : execution_mode_(mode) {
-    
+InferenceEngine::InferenceEngine(const std::string& model_path, const std::string& mode, 
+                                   const OptimizationSettings& opt)
+    : execution_mode_(mode), ctx_size_(opt.ctx_size) {
+
     std::cout << "[InferenceEngine] Initializing with model: " << model_path << std::endl;
+    std::cout << "[InferenceEngine] Optimization settings:" << std::endl;
+    std::cout << "  - Context size: " << opt.ctx_size << " tokens" << std::endl;
+    std::cout << "  - Repetition lookback: " << opt.repetition_lookback << " tokens" << std::endl;
+    std::cout << "  - KV cache: " << (opt.kv_cache ? "enabled" : "disabled") << std::endl;
+    std::cout << "  - Prefill chunk: " << opt.prefill_chunk << " tokens" << std::endl;
     std::cout << "[InferenceEngine] Execution mode: " << mode << std::endl;
     
     // Resolve model path (handles Hugging Face cache structure)
@@ -97,6 +101,16 @@ InferenceEngine::InferenceEngine(const std::string& model_path, const std::strin
 
 InferenceEngine::~InferenceEngine() {
     std::cout << "[InferenceEngine] Shutting down" << std::endl;
+}
+
+const std::vector<AdditionalToken>& InferenceEngine::getAdditionalTags() const {
+#ifdef MLX_ON
+    // For MLX backend, use the model's additional_tags which were loaded from config files
+    return model_->additional_tags;
+#else
+    // For Onyx/RYZENAI backend, use the fallback tags
+    return fallback_additional_tags_;
+#endif
 }
 
 GenerationParams InferenceEngine::getDefaultParams() const {
@@ -312,6 +326,12 @@ void InferenceEngine::loadModel() {
         // Create model using factory method
         model_ = OgaModel::Create(model_path_.c_str());
         
+#ifdef MLX_ON
+        // Set context size from command line (flows to KV cache max length)
+        model_->max_context_length = ctx_size_;
+        std::cout << "[InferenceEngine] Set model max_context_length: " << ctx_size_ << std::endl;
+#endif
+        
         // Create tokenizer using factory method
         tokenizer_ = OgaTokenizer::Create(*model_);
         
@@ -325,10 +345,80 @@ void InferenceEngine::loadModel() {
                     chat_template_ = config["chat_template"];
                     std::cout << "[InferenceEngine] Loaded chat template from tokenizer_config.json" << std::endl;
                 }
+                
+#ifndef MLX_ON
+                // For non-MLX backends (Onyx/RYZENAI), load additional tokens into fallback_additional_tags_
+                // MLX backend loads these in OgaModel::Create via loadAdditionalTokens()
+                if (config.contains("added_tokens_decoder") && config["added_tokens_decoder"].is_object()) {
+                    for (const auto& [token_id_str, token_info] : config["added_tokens_decoder"].items()) {
+                        if (token_info.contains("content") && token_info["content"].is_string()) {
+                            std::string content = token_info["content"];
+                            SpecialTokenType type = SpecialTokenType::UNKNOWN;
+
+                            // Classify token based on content
+                            if (content == "<think>") {
+                                type = SpecialTokenType::THINKING_START;
+                            } else if (content == "</think>") {
+                                type = SpecialTokenType::THINKING_END;
+                            } else if (content == "<tool_call>") {
+                                type = SpecialTokenType::TOOL_CALL_START;
+                            } else if (content == "</tool_call>") {
+                                type = SpecialTokenType::TOOL_CALL_END;
+                            } else if (content == "<tool_response>") {
+                                type = SpecialTokenType::TOOL_RESPONSE_START;
+                            } else if (content == "</tool_response>") {
+                                type = SpecialTokenType::TOOL_RESPONSE_END;
+                            } else if (content == "<|im_end|>") {
+                                type = SpecialTokenType::CHAT_END;
+                            } else if (content == "<|eot_id|>" || content == "<|end_of_turn|>" ||
+                                       content == "<|end|>" || content == "<end_of_turn>") {
+                                type = SpecialTokenType::CHAT_END;
+                            }
+
+                            if (type != SpecialTokenType::UNKNOWN) {
+                                AdditionalToken token;
+                                token.content = content;
+                                token.type = type;
+                                try {
+                                    token.token_id = std::stoi(token_id_str);
+                                } catch (...) {
+                                    token.token_id = -1;
+                                }
+                                fallback_additional_tags_.push_back(token);
+                                std::cout << "[InferenceEngine] Loaded special token: '" << content
+                                          << "' (ID: " << token.token_id << ")" << std::endl;
+                            }
+                        }
+                    }
+                }
+#endif
             } catch (const std::exception& e) {
                 std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
             }
         }
+        
+#ifndef MLX_ON
+        // Ensure we have fallback defaults if no tokens were found for non-MLX backends
+        if (fallback_additional_tags_.empty()) {
+            std::cout << "[InferenceEngine] No special tokens found, using fallback defaults" << std::endl;
+            
+            // Add basic thinking tokens with default values (token IDs unknown)
+            fallback_additional_tags_.push_back({"<think>", SpecialTokenType::THINKING_START, -1});
+            fallback_additional_tags_.push_back({"</think>", SpecialTokenType::THINKING_END, -1});
+            
+            // Add common chat end tokens
+            fallback_additional_tags_.push_back({"<|im_end|>", SpecialTokenType::CHAT_END, -1});
+            
+            // Add tool tokens
+            fallback_additional_tags_.push_back({"<tool_call>", SpecialTokenType::TOOL_CALL_START, -1});
+            fallback_additional_tags_.push_back({"</tool_call>", SpecialTokenType::TOOL_CALL_END, -1});
+            fallback_additional_tags_.push_back({"<tool_response>", SpecialTokenType::TOOL_RESPONSE_START, -1});
+            fallback_additional_tags_.push_back({"</tool_response>", SpecialTokenType::TOOL_RESPONSE_END, -1});
+        }
+        
+        std::cout << "[InferenceEngine] Loaded " << fallback_additional_tags_.size() 
+                  << " special tokens for streaming detection" << std::endl;
+#endif
         
         std::cout << "[InferenceEngine] Model and tokenizer loaded successfully" << std::endl;
         
@@ -359,113 +449,103 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
     std::lock_guard<std::mutex> lock(inference_mutex_);
     
     try {
-        // Start timing
         auto start_time = std::chrono::high_resolution_clock::now();
-        auto first_token_time = start_time;
-        bool first_token_received = false;
-        
-        // Tokenize input
         auto sequences = OgaSequences::Create();
         tokenizer_->Encode(prompt.c_str(), *sequences);
         
-        // Get token IDs and apply truncation
         const int32_t* input_ids_ptr = sequences->SequenceData(0);
         size_t input_ids_count = sequences->SequenceCount(0);
         std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
         input_ids = truncatePrompt(input_ids);
         
-        // Create generator params
         auto gen_params = OgaGeneratorParams::Create(*model_);
-        // max_length should be prompt_length + max_new_tokens
-        // params.max_length is max_new_tokens from the caller
         gen_params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + params.max_length);
         gen_params->SetSearchOption("temperature", params.temperature);
         gen_params->SetSearchOption("top_p", params.top_p);
         gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
         gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
         gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-        // Lock random_seed to 1 for deterministic behavior (matching Python reference)
         gen_params->SetSearchOption("random_seed", 1.0);
+
+        int eos_id = model_->GetEosId();
+        gen_params->SetSearchOption("eos_token_id", eos_id);
+        gen_params->SetSearchOption("pad_token_id", eos_id);
         
-        // Generate
         auto generator = OgaGenerator::Create(*model_, *gen_params);
 #ifdef MLX_ON
         generator->SetTokenizer(*tokenizer_);
 #endif
-
-        // Set input tokens
         generator->AppendTokens(input_ids.data(), input_ids.size());
         
-        std::cout << "[InferenceEngine] Generating tokens..." << std::endl;
-        
+        std::cout << "[InferenceEngine] Generating..." << std::endl;
+
+        // Get model-specific stop sequences
+        std::vector<std::string> model_stop_sequences;
+#ifdef MLX_ON
+        model_stop_sequences = model_->GetStopSequences();
+#endif
+
+        auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer_);
+        std::string accumulated_output;
+
         while (!generator->IsDone()) {
             generator->GenerateNextToken();
-            
-            // Track time to first token
-            if (!first_token_received) {
-                first_token_time = std::chrono::high_resolution_clock::now();
-                first_token_received = true;
+
+            const int32_t* seq = generator->GetSequenceData(0);
+            if (generator->GetSequenceCount(0) > 0) {
+                int32_t new_token = seq[generator->GetSequenceCount(0) - 1];
+                if (model_->IsEos(new_token)) break;
+
+                // Check for string stop sequences
+                const char* decoded = tokenizer_stream->Decode(new_token);
+                if (decoded && decoded[0] != '\0') {
+                    std::string token_str(decoded);
+                    std::string temp_output = accumulated_output + token_str;
+
+                    // Check model-specific stop sequences
+                    bool should_stop = false;
+                    for (const auto& stop_seq : model_stop_sequences) {
+                        if (temp_output.find(stop_seq) != std::string::npos) {
+                            std::cout << "[InferenceEngine] Stop sequence detected: '" << stop_seq << "' - Stopping generation." << std::endl;
+                            should_stop = true;
+                            break;
+                        }
+                    }
+                    if (should_stop) break;
+
+                    accumulated_output = temp_output;
+                }
             }
         }
         
-        // End timing
         auto end_time = std::chrono::high_resolution_clock::now();
         
-        // Get the output
         const int32_t* output_ptr = generator->GetSequenceData(0);
         size_t output_count = generator->GetSequenceCount(0);
         
-        // Calculate actual generated token count
-        int generated_token_count = (output_count > input_ids.size()) 
-            ? static_cast<int>(output_count - input_ids.size()) 
-            : 0;
-        
-        // Calculate timing metrics
-        auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        auto ttft_duration = std::chrono::duration_cast<std::chrono::milliseconds>(first_token_time - start_time);
-        double ttft_seconds = ttft_duration.count() / 1000.0;
-        double total_time_ms = static_cast<double>(total_duration.count());
-        
-        // Calculate TPS: tokens generated after the first token, divided by time after first token
-        double decode_time_seconds = (total_duration.count() - ttft_duration.count()) / 1000.0;
-        double tps = 0.0;
-        if (generated_token_count > 1 && decode_time_seconds > 0) {
-            // TPS = (tokens - 1) / decode_time (exclude first token from TPS calculation)
-            tps = (generated_token_count - 1) / decode_time_seconds;
-        } else if (generated_token_count == 1 && total_time_ms > 0) {
-            // Only one token generated - use total time
-            tps = 1.0 / (total_time_ms / 1000.0);
+        if (out_timing) {
+            int generated_count = (output_count > input_ids.size()) ? (output_count - input_ids.size()) : 0;
+            auto total = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            out_timing->total_time_ms = static_cast<double>(total.count());
+            out_timing->token_count = generated_count;
         }
         
-        // Return timing data if requested
-        if (out_timing != nullptr) {
-            out_timing->token_count = generated_token_count;
-            out_timing->ttft_seconds = ttft_seconds;
-            out_timing->tps = tps;
-            out_timing->total_time_ms = total_time_ms;
-        }
-        
-        // Decode only the newly generated tokens (skip the input prompt)
         std::string result;
         if (output_count > input_ids.size()) {
-            auto decoded = tokenizer_->Decode(output_ptr + input_ids.size(), output_count - input_ids.size());
+            // Trim EOS if present at the very end
+            size_t decode_count = output_count - input_ids.size();
+            if (decode_count > 0 && output_ptr[output_count-1] == eos_id) {
+                decode_count--;
+            }
+            auto decoded = tokenizer_->Decode(output_ptr + input_ids.size(), decode_count);
             result = std::string(decoded);
-        } else {
-            // No new tokens generated
-            result = "";
         }
         
-        // Apply stop sequences - remove stop sequence and everything after it
+        // Strip custom stop sequences
         for (const auto& stop_seq : params.stop_sequences) {
             size_t pos = result.find(stop_seq);
-            if (pos != std::string::npos) {
-                result = result.substr(0, pos);
-                break;  // Stop at first match
-            }
+            if (pos != std::string::npos) result = result.substr(0, pos);
         }
-        
-        std::cout << "[InferenceEngine] Generated " << generated_token_count << " tokens in " 
-                  << total_time_ms << "ms (TTFT: " << (ttft_seconds * 1000) << "ms, TPS: " << tps << ")" << std::endl;
         
         return result;
         
@@ -480,99 +560,136 @@ void InferenceEngine::streamComplete(const std::string& prompt,
     std::lock_guard<std::mutex> lock(inference_mutex_);
     
     try {
-        // Tokenize input
         auto sequences = OgaSequences::Create();
         tokenizer_->Encode(prompt.c_str(), *sequences);
         
-        // Get token IDs and apply truncation
         const int32_t* input_ids_ptr = sequences->SequenceData(0);
         size_t input_ids_count = sequences->SequenceCount(0);
         std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
         input_ids = truncatePrompt(input_ids);
         
-        // Create generator params
         auto gen_params = OgaGeneratorParams::Create(*model_);
-        // max_length should be prompt_length + max_new_tokens
-        // params.max_length is max_new_tokens from the caller
         int total_max_length = static_cast<int>(input_ids.size()) + params.max_length;
-        std::cout << "[InferenceEngine::streamComplete] prompt_length=" << input_ids.size() 
-                  << ", max_new_tokens=" << params.max_length 
-                  << ", total_max_length=" << total_max_length << std::endl;
         gen_params->SetSearchOption("max_length", total_max_length);
         gen_params->SetSearchOption("temperature", params.temperature);
         gen_params->SetSearchOption("top_p", params.top_p);
         gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
         gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
         gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-        // Lock random_seed to 1 for deterministic behavior (matching Python reference)
         gen_params->SetSearchOption("random_seed", 1.0);
+
+        int eos_id = model_->GetEosId();
+        gen_params->SetSearchOption("eos_token_id", eos_id);
+        gen_params->SetSearchOption("pad_token_id", eos_id);
         
-        // Generate
         auto generator = OgaGenerator::Create(*model_, *gen_params);
 #ifdef MLX_ON
         generator->SetTokenizer(*tokenizer_);
 #endif
-        // Set input tokens
         generator->AppendTokens(input_ids.data(), input_ids.size());
         
-        std::cout << "[InferenceEngine] Generating tokens (streaming)..." << std::endl;
-        
-        // Use OgaTokenizerStream for efficient incremental token decoding
+        std::cout << "[InferenceEngine] Streaming... (EOS Token ID: " << eos_id << ")" << std::endl;
+
+        // Get model-specific stop sequences
+        std::vector<std::string> model_stop_sequences;
+#ifdef MLX_ON
+        model_stop_sequences = model_->GetStopSequences();
+#endif
+
         auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer_);
-        
         size_t token_count = 0;
-        std::string accumulated_output;  // Track full output for stop sequence detection
-        bool client_disconnected = false;  // Track if client disconnected
+        std::string accumulated_output;
+        bool client_disconnected = false;
+
+        // Get CHAT_END token IDs for additional stop checking
+        std::vector<int32_t> chat_end_token_ids;
+#ifdef MLX_ON
+        for (const auto& tag : model_->additional_tags) {
+            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
+                chat_end_token_ids.push_back(tag.token_id);
+                std::cout << "[InferenceEngine] Added CHAT_END token ID: " << tag.token_id << " ('" << tag.content << "')" << std::endl;
+            }
+        }
+#else
+        for (const auto& tag : fallback_additional_tags_) {
+            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
+                chat_end_token_ids.push_back(tag.token_id);
+                std::cout << "[InferenceEngine] Added CHAT_END token ID: " << tag.token_id << " ('" << tag.content << "')" << std::endl;
+            }
+        }
+#endif
         
+        if (chat_end_token_ids.empty()) {
+            std::cout << "[InferenceEngine] WARNING: No CHAT_END token IDs found!" << std::endl;
+        }
+
         while (!generator->IsDone() && !client_disconnected) {
             generator->GenerateNextToken();
-            
-            // Get just the new token
+
             const int32_t* all_tokens = generator->GetSequenceData(0);
             size_t num_tokens = generator->GetSequenceCount(0);
             int32_t new_token = all_tokens[num_tokens - 1];
+
+            // Even if the backend logic misses it, we force break here.
+            if (model_->IsEos(new_token)) {
+                std::cout << "[InferenceEngine] Hit EOS token - Stopping." << std::endl;
+                break;
+            }
             
-            // Decode incrementally using tokenizer stream (this works!)
+            // Also check for CHAT_END token IDs (e.g., <|im_end|> for Qwen)
+            bool is_chat_end = false;
+            for (int32_t chat_end_id : chat_end_token_ids) {
+                if (new_token == chat_end_id) {
+                    std::cout << "[InferenceEngine] Hit CHAT_END token (ID: " << new_token << ") - Stopping." << std::endl;
+                    is_chat_end = true;
+                    break;
+                }
+            }
+            if (is_chat_end) break;
+
             const char* decoded = tokenizer_stream->Decode(new_token);
             if (decoded && decoded[0] != '\0') {
                 std::string token_str(decoded);
-                
-                // Check for stop sequences before accumulating
+
+                // Stop Sequence Check
                 bool should_stop = false;
+
+                // Check params stop sequences
                 for (const auto& stop_seq : params.stop_sequences) {
-                    // Check if adding this token would complete a stop sequence
-                    std::string temp_output = accumulated_output + token_str;
-                    if (temp_output.find(stop_seq) != std::string::npos) {
+                    std::string temp = accumulated_output + token_str;
+                    if (temp.find(stop_seq) != std::string::npos) {
                         should_stop = true;
                         break;
                     }
                 }
-                
-                if (should_stop) {
-                    // Stop generation - don't send this token
-                    break;
+
+                // Check model-specific stop sequences
+                if (!should_stop) {
+                    for (const auto& stop_seq : model_stop_sequences) {
+                        std::string temp = accumulated_output + token_str;
+                        if (temp.find(stop_seq) != std::string::npos) {
+                            std::cout << "[InferenceEngine] Stop sequence detected: '" << stop_seq << "' - Stopping streaming." << std::endl;
+                            should_stop = true;
+                            break;
+                        }
+                    }
                 }
-                
+
+                if (should_stop) break;
+
                 accumulated_output += token_str;
                 bool is_final = generator->IsDone();
-                
-                // Call callback and check if client is still connected
+
                 if (!callback(token_str, is_final)) {
                     client_disconnected = true;
-                    std::cout << "[InferenceEngine] Client disconnected, stopping generation" << std::endl;
+                    std::cout << "[InferenceEngine] Client disconnected" << std::endl;
                     break;
                 }
             }
-            
             token_count++;
         }
         
-        if (client_disconnected) {
-            std::cout << "[InferenceEngine] Generation stopped early due to client disconnect (generated " 
-                      << token_count << " tokens)" << std::endl;
-        }
-        
-        std::cout << "[InferenceEngine] Generated " << token_count << " tokens (streaming)" << std::endl;
+        std::cout << "[InferenceEngine] Streamed " << token_count << " tokens." << std::endl;
         
     } catch (const std::exception& e) {
         throw std::runtime_error("Streaming inference failed: " + std::string(e.what()));

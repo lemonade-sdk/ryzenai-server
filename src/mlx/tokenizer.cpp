@@ -1,484 +1,366 @@
 /*
  * tokenizer.cpp
- * 
- * Tokenizer implementation supporting SentencePiece and HuggingFace formats.
- * Provides text encoding, decoding, and chat template processing.
+ * * Robust Universal Tokenizer
+ * * Features: Special Token Handling, Universal Cleanup, Defensive Parsing
  */
 
 #include "ryzenai/mlx/tokenizer.h"
 #include <json.hpp>
+#include <sentencepiece_processor.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <regex>
+#include <codecvt>
+#include <locale>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
-thread_local std::string decoded_buffer;
+thread_local std::string tl_decoded_buffer;
 
-
-std::unique_ptr<OgaSequences> OgaSequences::Create() {
-    return std::make_unique<OgaSequences>();
+// =========================================================
+// UNIVERSAL CLEANUP
+// =========================================================
+void universal_cleanup(std::string& text) {
+    auto replace_all = [&](const std::string& from, const std::string& to) {
+        if (from.empty()) return;
+        size_t start_pos = 0;
+        while ((start_pos = text.find(from, start_pos)) != std::string::npos) {
+            text.replace(start_pos, from.length(), to);
+            start_pos += to.length(); 
+        }
+    };
+    
+    // Qwen/GPT-2
+    replace_all("\xC4\x8A", "\n"); // Ċ
+    replace_all("\xC4\xA0", " ");  // Ġ
+    replace_all("\xC4\x89", "\t"); // ĉ
+    // Llama/SP
+    replace_all("\xE2\x96\x81", " "); // _
 }
 
-
-const int32_t* OgaSequences::SequenceData(int) const {
-    return ids.data();
-}
-
-
-size_t OgaSequences::SequenceCount(int) const {
-    return ids.size();
-}
-
-
-/*
- * OgaTokenizer::Create
- * 
- * Factory function that initializes a tokenizer from model files.
- * Priority: SentencePiece (.model) > HuggingFace (.json) > fallback
- */
-std::unique_ptr<OgaTokenizer> OgaTokenizer::Create(const OgaModel& model) {
-    auto tok = std::make_unique<OgaTokenizer>();
-
-    std::string sp_model_path = model.model_path + "/tokenizer.model";
-    if (fs::exists(sp_model_path)) {
-        try {
-            tok->sp_processor = std::make_unique<sentencepiece::SentencePieceProcessor>();
-            if (tok->sp_processor->Load(sp_model_path).ok()) {
-                tok->use_sentencepiece = true;
-                std::cout << "[Tokenizer] Loaded SentencePiece: " << sp_model_path << std::endl;
-            } else {
-                std::cerr << "[Tokenizer] SentencePiece load failed, using fallback" << std::endl;
-                tok->sp_processor.reset();
-                tok->use_sentencepiece = false;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[Tokenizer] SentencePiece init error: " << e.what() << std::endl;
-            tok->sp_processor.reset();
-            tok->use_sentencepiece = false;
-        }
-    } else {
-        std::cout << "[Tokenizer] No tokenizer.model, checking for HuggingFace format" << std::endl;
+// =========================================================
+// SENTENCEPIECE
+// =========================================================
+class SentencePieceBackend : public TokenizerBackend {
+    sentencepiece::SentencePieceProcessor processor;
+public:
+    SentencePieceBackend(const std::string& path) {
+        if (!processor.Load(path).ok()) throw std::runtime_error("Failed to load SentencePiece model");
     }
-
-    std::string hf_tokenizer_path = model.model_path + "/tokenizer.json";
-    if (!tok->use_sentencepiece && fs::exists(hf_tokenizer_path)) {
-        try {
-            std::ifstream f(hf_tokenizer_path);
-            nlohmann::json tokenizer_config;
-            f >> tokenizer_config;
-
-            if (tokenizer_config.contains("model") && tokenizer_config["model"].contains("vocab")) {
-                auto& vocab_json = tokenizer_config["model"]["vocab"];
-                for (auto& [token, id] : vocab_json.items()) {
-                    int32_t token_id = id.get<int32_t>();
-                    tok->vocab[token] = token_id;
-                    tok->reverse_vocab[token_id] = token;
-                }
-                tok->use_hf_tokenizer = true;
-                std::cout << "[Tokenizer] Loaded HuggingFace vocab (" 
-                          << tok->vocab.size() << " tokens)" << std::endl;
-            } else {
-                std::cerr << "[Tokenizer] HuggingFace tokenizer missing vocab section" << std::endl;
-                tok->use_hf_tokenizer = false;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[Tokenizer] HuggingFace parse error: " << e.what() << std::endl;
-            tok->use_hf_tokenizer = false;
-        }
-    }
-
-    if (!tok->use_sentencepiece && !tok->use_hf_tokenizer) {
-        tok->vocab["<unk>"] = 0;
-        tok->vocab["<s>"] = 1;
-        tok->vocab["</s>"] = 2;
-        tok->reverse_vocab[0] = "<unk>";
-        tok->reverse_vocab[1] = "<s>";
-        tok->reverse_vocab[2] = "</s>";
-        
-        int id = 3;
-        for (char c = 'a'; c <= 'z'; ++c) {
-            std::string token(1, c);
-            tok->vocab[token] = id;
-            tok->reverse_vocab[id] = token;
-            id++;
-        }
-        tok->vocab[" "] = id;
-        tok->reverse_vocab[id] = " ";
-        std::cout << "[Tokenizer] Using basic fallback tokenizer" << std::endl;
-    }
-
-    std::string config_path = model.model_path + "/tokenizer_config.json";
-    if (fs::exists(config_path)) {
-        std::ifstream f(config_path);
-        nlohmann::json config;
-        try {
-            f >> config;
-            if (config.contains("chat_template") && config["chat_template"].is_string()) {
-                tok->chat_template = config["chat_template"].get<std::string>();
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[Tokenizer] Config parse error: " << e.what() << std::endl;
-        }
-    }
-
-    return tok;
-}
-
-
-/*
- * OgaTokenizer::Encode
- * 
- * Converts input text to a sequence of token IDs.
- * Uses SentencePiece if available, otherwise HuggingFace BPE-style encoding.
- */
-void OgaTokenizer::Encode(const char* text, OgaSequences& sequences) {
-    std::vector<int32_t> ids;
-
-    if (use_sentencepiece && sp_processor) {
+    void Encode(const std::string& text, std::vector<int32_t>& ids) override {
         std::vector<int> sp_ids;
-        if (sp_processor->Encode(text, &sp_ids).ok()) {
-            ids.assign(sp_ids.begin(), sp_ids.end());
-            sequences.ids = std::move(ids);
-            return;
-        } else {
-            std::cerr << "[Tokenizer] SentencePiece encode failed" << std::endl;
-            use_sentencepiece = false;
-        }
+        processor.Encode(text, &sp_ids);
+        ids.assign(sp_ids.begin(), sp_ids.end());
+    }
+    std::string Decode(const std::vector<int32_t>& ids) override {
+        std::string text;
+        std::vector<int> sp_ids(ids.begin(), ids.end());
+        processor.Decode(sp_ids, &text);
+        return text;
+    }
+};
+
+// =========================================================
+// HUGGINGFACE BPE (With Special Token Support)
+// =========================================================
+class HuggingFaceBackend : public TokenizerBackend {
+    std::unordered_map<std::string, int32_t> vocab;
+    std::unordered_map<int32_t, std::string> reverse_vocab;
+    std::unordered_map<std::string, int> bpe_ranks;
+    std::vector<std::pair<std::string, int32_t>> special_tokens; // For Encode
+    std::regex pat;
+    int32_t unk_token_id = 0;
+
+public:
+    HuggingFaceBackend(const std::string& json_path) {
+        std::cout << "[Tokenizer] Parsing " << json_path << "..." << std::endl;
+        std::ifstream f(json_path);
+        json j = json::parse(f);
+
+        // 1. Load Vocab
+        auto load_vocab = [&](const json& v_obj) {
+            for (auto& [token, id] : v_obj.items()) {
+                if (id.is_number_integer()) {
+                    int32_t i = id.template get<int32_t>();
+                    vocab[token] = i;
+                    reverse_vocab[i] = token;
+                }
+            }
+        };
+
+        try {
+            if (j.contains("model") && j["model"].contains("vocab")) load_vocab(j["model"]["vocab"]);
+            else if (j.contains("vocab")) load_vocab(j["vocab"]);
+        } catch (...) {}
+        
+        std::cout << "[Tokenizer] Vocab size: " << reverse_vocab.size() << std::endl;
+
+        // 2. Load Merges
+        try {
+            if (j.contains("model") && j["model"].contains("merges")) {
+                auto& merges = j["model"]["merges"];
+                if (merges.is_array()) {
+                    int rank = 0;
+                    for (const auto& merge : merges) {
+                        if (merge.is_string()) bpe_ranks[merge.get<std::string>()] = rank++;
+                    }
+                }
+            }
+        } catch (...) {}
+
+        // 3. Added Tokens (Special Tokens)
+        try {
+            if (j.contains("added_tokens")) {
+                for (const auto& t : j["added_tokens"]) {
+                    if (t.contains("id") && t.contains("content")) {
+                        int32_t id = t["id"].get<int32_t>();
+                        std::string content = t["content"].get<std::string>();
+                        vocab[content] = id;
+                        reverse_vocab[id] = content;
+                        special_tokens.push_back({content, id});
+                    }
+                }
+            }
+        } catch (...) {}
+
+        // Sort special tokens by length (longest first) to match greedy
+        std::sort(special_tokens.begin(), special_tokens.end(), [](const auto& a, const auto& b) {
+            return a.first.length() > b.first.length();
+        });
+        
+        // 4. Regex
+        pat = std::regex(R"(\s+\S+|\S+)", std::regex::optimize);
     }
 
-    if (use_hf_tokenizer) {
-        std::string input(text);
-        size_t pos = 0;
-        
-        std::vector<std::pair<std::string, int32_t>> special_tokens;
-        for (const auto& [token, id] : vocab) {
-            if (token.size() > 2 && token[0] == '<' && token.back() == '>') {
-                special_tokens.emplace_back(token, id);
-            }
+    void bpe(const std::string& token, std::vector<std::string>& bpe_tokens) {
+        std::vector<std::string> word;
+        for (size_t i = 0; i < token.length();) {
+            unsigned char c = token[i];
+            size_t n = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+            if (i + n > token.length()) n = 1;
+            word.push_back(token.substr(i, n));
+            i += n;
         }
-        std::sort(special_tokens.begin(), special_tokens.end(),
-            [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+
+        if (word.empty()) return;
+
+        while (word.size() > 1) {
+            int min_rank = std::numeric_limits<int>::max();
+            int best_idx = -1;
+
+            for (size_t i = 0; i < word.size() - 1; ++i) {
+                std::string pair_key = word[i] + " " + word[i+1];
+                auto it = bpe_ranks.find(pair_key);
+                if (it != bpe_ranks.end() && it->second < min_rank) {
+                    min_rank = it->second;
+                    best_idx = i;
+                }
+            }
+
+            if (best_idx == -1) break;
+
+            std::string merged = word[best_idx] + word[best_idx+1];
+            word[best_idx] = merged;
+            word.erase(word.begin() + best_idx + 1);
+        }
+        bpe_tokens.insert(bpe_tokens.end(), word.begin(), word.end());
+    }
+
+    // UPDATED ENCODE: Handles Special Tokens correctly!
+    void Encode(const std::string& text, std::vector<int32_t>& ids) override {
+        size_t start = 0;
         
-        bool word_start = true;
-        
-        while (pos < input.size()) {
+        while (start < text.length()) {
+            // 1. Check for Special Tokens at current position
             bool found_special = false;
-            
-            for (const auto& [token, id] : special_tokens) {
-                if (input.compare(pos, token.size(), token) == 0) {
-                    ids.push_back(id);
-                    pos += token.size();
+            for (const auto& [spec_str, spec_id] : special_tokens) {
+                if (text.compare(start, spec_str.length(), spec_str) == 0) {
+                    ids.push_back(spec_id);
+                    start += spec_str.length();
                     found_special = true;
-                    word_start = true;
                     break;
                 }
             }
             if (found_special) continue;
-            
-            if (input[pos] == ' ') {
-                word_start = true;
-                pos++;
-                continue;
-            }
-            
-            if (input[pos] == '\n') {
-                auto nl_it = vocab.find("<0x0A>");
-                if (nl_it != vocab.end()) {
-                    ids.push_back(nl_it->second);
-                } else {
-                    nl_it = vocab.find("\n");
-                    if (nl_it != vocab.end()) {
-                        ids.push_back(nl_it->second);
+
+            // 2. Find next chunk of regular text (until next special token or end)
+            size_t next_special_pos = std::string::npos;
+            for (const auto& [spec_str, _] : special_tokens) {
+                size_t pos = text.find(spec_str, start);
+                if (pos != std::string::npos) {
+                    if (next_special_pos == std::string::npos || pos < next_special_pos) {
+                        next_special_pos = pos;
                     }
                 }
-                word_start = true;
-                pos++;
-                continue;
             }
             
-            size_t best_len = 0;
-            int32_t best_id = 0;
+            size_t chunk_len = (next_special_pos == std::string::npos) ? std::string::npos : next_special_pos - start;
+            std::string chunk = text.substr(start, chunk_len);
             
-            for (size_t len = std::min(size_t(15), input.size() - pos); len > 0; --len) {
-                std::string candidate = input.substr(pos, len);
-                
-                if (word_start) {
-                    std::string with_underscore = "▁" + candidate;
-                    auto it = vocab.find(with_underscore);
-                    if (it != vocab.end()) {
-                        best_len = len;
-                        best_id = it->second;
-                        break;
+            if (!chunk.empty()) {
+                // 3. Run BPE on the regular text chunk
+                std::sregex_iterator it(chunk.begin(), chunk.end(), pat);
+                std::sregex_iterator end;
+                for (; it != end; ++it) {
+                    std::string token = it->str();
+                    std::vector<std::string> bpe_tokens;
+                    bpe(token, bpe_tokens);
+                    for (const auto& t : bpe_tokens) {
+                        if (vocab.count(t)) ids.push_back(vocab[t]);
+                        else {
+                            // Byte fallback
+                            for (unsigned char c : t) {
+                                std::stringstream ss; ss << "<0x" << std::hex << std::uppercase << (c < 16 ? "0" : "") << (int)c << ">";
+                                if (vocab.count(ss.str())) { ids.push_back(vocab[ss.str()]); continue; }
+                                std::string raw(1, (char)c);
+                                if (vocab.count(raw)) { ids.push_back(vocab[raw]); continue; }
+                                ids.push_back(unk_token_id);
+                            }
+                        }
                     }
                 }
-                
-                auto it = vocab.find(candidate);
-                if (it != vocab.end()) {
-                    best_len = len;
-                    best_id = it->second;
-                    break;
-                }
             }
             
-            if (best_len > 0) {
-                ids.push_back(best_id);
-                pos += best_len;
-                word_start = false;
-            } else {
-                std::string ch(1, input[pos]);
-                
-                if (word_start) {
-                    std::string with_underscore = "▁" + ch;
-                    auto it = vocab.find(with_underscore);
-                    if (it != vocab.end()) {
-                        ids.push_back(it->second);
-                        pos++;
-                        word_start = false;
+            if (next_special_pos == std::string::npos) break;
+            start = next_special_pos;
+        }
+    }
+
+    std::string Decode(const std::vector<int32_t>& ids) override {
+        std::string text;
+        for (int32_t id : ids) {
+            if (reverse_vocab.count(id)) {
+                std::string token = reverse_vocab[id];
+                if (token.size() == 6 && token.substr(0,3) == "<0x" && token.back() == '>') {
+                    try {
+                        int b = std::stoi(token.substr(3,2), nullptr, 16);
+                        text += (char)b;
                         continue;
-                    }
+                    } catch(...) {}
                 }
-                
-                auto it = vocab.find(ch);
-                if (it != vocab.end()) {
-                    ids.push_back(it->second);
-                    word_start = false;
-                } else {
-                    std::cerr << "[Tokenizer] Unknown char: '" << ch 
-                              << "' (0x" << std::hex << (int)(unsigned char)input[pos] 
-                              << std::dec << ")" << std::endl;
-                }
-                pos++;
+                text += token;
             }
         }
-        
-        sequences.ids = std::move(ids);
-        return;
+        return text;
+    }
+};
+
+// =========================================================
+// OGA TOKENIZER
+// =========================================================
+
+std::unique_ptr<OgaSequences> OgaSequences::Create() { return std::make_unique<OgaSequences>(); }
+const int32_t* OgaSequences::SequenceData(int) const { return ids.data(); }
+size_t OgaSequences::SequenceCount(int) const { return ids.size(); }
+
+std::unique_ptr<OgaTokenizer> OgaTokenizer::Create(const OgaModel& model) {
+    auto tok = std::make_unique<OgaTokenizer>();
+
+    // 1. HuggingFace JSON
+    std::string hf_path = model.model_path + "/tokenizer.json";
+    if (fs::exists(hf_path)) {
+        try {
+            tok->backend = std::make_unique<HuggingFaceBackend>(hf_path);
+            std::cout << "[Tokenizer] Loaded HuggingFace backend" << std::endl;
+        } catch(const std::exception& e) {
+            std::cerr << "[Tokenizer] JSON load failed: " << e.what() << std::endl;
+        }
     }
 
-    std::string input(text);
-    size_t pos = 0;
-    while (pos < input.size()) {
-        size_t next_space = input.find(' ', pos);
-        if (next_space == std::string::npos) {
-            next_space = input.size();
+    // 2. SentencePiece
+    if (!tok->backend) {
+        std::string sp_path = model.model_path + "/tokenizer.model";
+        if (fs::exists(sp_path)) {
+            try {
+                tok->backend = std::make_unique<SentencePieceBackend>(sp_path);
+                std::cout << "[Tokenizer] Loaded SentencePiece backend" << std::endl;
+            } catch(...) {}
         }
-
-        std::string token = input.substr(pos, next_space - pos);
-        if (!token.empty()) {
-            auto it = vocab.find(token);
-            if (it != vocab.end()) {
-                ids.push_back(it->second);
-            } else {
-                ids.push_back(0);
-            }
-        }
-
-        if (next_space < input.size()) {
-            auto sp_it = vocab.find(" ");
-            if (sp_it != vocab.end()) {
-                ids.push_back(sp_it->second);
-            }
-        }
-
-        pos = next_space + 1;
     }
 
-    sequences.ids = std::move(ids);
+    std::string config_path = model.model_path + "/tokenizer_config.json";
+    if (fs::exists(config_path)) {
+        try {
+            std::ifstream f(config_path);
+            json config = json::parse(f);
+            if (config.contains("chat_template") && config["chat_template"].is_string()) {
+                tok->chat_template_str = config["chat_template"].get<std::string>();
+            }
+        } catch(...) {}
+    }
+
+    if (!tok->backend) std::cerr << "[Tokenizer] ERROR: No backend loaded!" << std::endl;
+    return tok;
 }
 
+void OgaTokenizer::Encode(const char* text, OgaSequences& sequences) {
+    if (backend) backend->Encode(text, sequences.ids);
+}
 
-/*
- * OgaTokenizer::Decode
- * 
- * Converts token IDs back to text.
- * Returns pointer to thread-local buffer (valid until next call).
- */
 oga_char_ptr OgaTokenizer::Decode(const int32_t* tokens, size_t count) {
-    std::string detok;
-
-    if (use_sentencepiece && sp_processor) {
-        std::vector<int> token_vec(tokens, tokens + count);
-        if (sp_processor->Decode(token_vec, &detok).ok()) {
-            decoded_buffer = std::move(detok);
-            return decoded_buffer.c_str();
-        } else {
-            std::cerr << "[Tokenizer] SentencePiece decode failed" << std::endl;
-            use_sentencepiece = false;
-        }
-    }
-
-    for (size_t i = 0; i < count; ++i) {
-        auto it = reverse_vocab.find(tokens[i]);
-        if (it != reverse_vocab.end()) {
-            detok += it->second;
-        } else {
-            detok += "<unk>";
-        }
-    }
-
-    decoded_buffer = std::move(detok);
-    return decoded_buffer.c_str();
+    if (!backend) return "";
+    std::vector<int32_t> ids(tokens, tokens + count);
+    std::string raw = backend->Decode(ids);
+    universal_cleanup(raw);
+    tl_decoded_buffer = raw;
+    return tl_decoded_buffer.c_str();
 }
 
-
-/*
- * OgaTokenizer::ApplyChatTemplate
- * 
- * Formats conversation messages according to the model's chat template.
- * Auto-detects template format from template string patterns.
- */
 oga_char_ptr OgaTokenizer::ApplyChatTemplate(const char* template_str, const char* messages_json, 
                                               const char* tools_json, bool add_generation_prompt) {
-    if (tools_json && tools_json[0] != '\0') {
-        throw std::runtime_error("Tools not supported in MLX backend");
-    }
-    
-    std::string tmpl = (template_str && template_str[0] != '\0') ? template_str : chat_template;
-    nlohmann::json messages = nlohmann::json::parse(messages_json);
-    std::ostringstream result;
-    
-    bool is_phi3 = (tmpl.find("<|user|>") != std::string::npos && 
-                    tmpl.find("<|end|>") != std::string::npos);
-    bool is_chatml = (tmpl.find("<|im_start|>") != std::string::npos);
-    bool is_llama2 = (tmpl.find("[INST]") != std::string::npos);
-    bool is_llama3 = (tmpl.find("<|start_header_id|>") != std::string::npos);
-    bool is_mistral = (tmpl.find("[INST]") != std::string::npos && 
-                       tmpl.find("<<SYS>>") == std::string::npos);
-    bool is_gemma = (tmpl.find("<start_of_turn>") != std::string::npos);
-    bool is_vicuna = (tmpl.find("### Human:") != std::string::npos ||
-                      tmpl.find("### User:") != std::string::npos);
-    
-    if (is_phi3) {
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            
-            if (role == "system") {
-                result << "<|system|>\n" << content << "<|end|>\n";
-            } else if (role == "user") {
-                result << "<|user|>\n" << content << "<|end|>\n";
-            } else if (role == "assistant") {
-                result << "<|assistant|>\n" << content << "<|end|>\n";
-            }
-        }
-        if (add_generation_prompt) {
-            result << "<|assistant|>\n";
-        }
-    } else if (is_chatml) {
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            result << "<|im_start|>" << role << "\n" << content << "<|im_end|>\n";
-        }
-        if (add_generation_prompt) {
-            result << "<|im_start|>assistant\n";
-        }
-    } else if (is_llama3) {
-        result << "<|begin_of_text|>";
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            result << "<|start_header_id|>" << role << "<|end_header_id|>\n\n" << content << "<|eot_id|>";
-        }
-        if (add_generation_prompt) {
-            result << "<|start_header_id|>assistant<|end_header_id|>\n\n";
-        }
-    } else if (is_gemma) {
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            if (role == "assistant") role = "model";
-            result << "<start_of_turn>" << role << "\n" << content << "<end_of_turn>\n";
-        }
-        if (add_generation_prompt) {
-            result << "<start_of_turn>model\n";
-        }
-    } else if (is_vicuna) {
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            
-            if (role == "system") {
-                result << content << "\n\n";
-            } else if (role == "user") {
-                result << "### Human: " << content << "\n";
-            } else if (role == "assistant") {
-                result << "### Assistant: " << content << "\n";
-            }
-        }
-        if (add_generation_prompt) {
-            result << "### Assistant:";
-        }
-    } else if (is_llama2 || is_mistral) {
-        std::string system_msg;
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            
-            if (role == "system") {
-                system_msg = content;
-            } else if (role == "user") {
-                result << "[INST] ";
-                if (!system_msg.empty()) {
-                    result << "<<SYS>>\n" << system_msg << "\n<</SYS>>\n\n";
-                    system_msg.clear();
-                }
-                result << content << " [/INST]";
-            } else if (role == "assistant") {
-                result << " " << content << "</s>";
-            }
-        }
-    } else {
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            
-            if (role == "system") {
-                result << "System: " << content << "\n\n";
-            } else if (role == "user") {
-                result << "User: " << content << "\n\n";
-            } else if (role == "assistant") {
-                result << "Assistant: " << content << "\n\n";
-            }
-        }
-        if (add_generation_prompt) {
-            result << "Assistant: ";
-        }
-    }
-    
-    decoded_buffer = result.str();
-    return decoded_buffer.c_str();
-}
+    std::string active_template = (template_str && template_str[0]) ? template_str : chat_template_str;
+    enum class TemplateType { ChatML, Llama2, Llama3, Phi3, Gemma, Mistral, Vicuna, Unknown };
+    TemplateType type = TemplateType::Unknown;
 
+    if (active_template.find("<|im_start|>") != std::string::npos) type = TemplateType::ChatML;
+    else if (active_template.find("<|start_header_id|>") != std::string::npos) type = TemplateType::Llama3;
+    else if (active_template.find("<|user|>") != std::string::npos) type = TemplateType::Phi3;
+    else if (active_template.find("<start_of_turn>") != std::string::npos) type = TemplateType::Gemma;
+    else if (active_template.find("[INST]") != std::string::npos) {
+        type = (active_template.find("<<SYS>>") != std::string::npos) ? TemplateType::Llama2 : TemplateType::Mistral;
+    }
+
+    json messages;
+    try { messages = json::parse(messages_json); } catch(...) { return ""; }
+    
+    std::ostringstream ss;
+    for (const auto& msg : messages) {
+        std::string role = msg.value("role", "user");
+        std::string content = msg.value("content", "");
+        switch(type) {
+            case TemplateType::ChatML: ss << "<|im_start|>" << role << "\n" << content << "<|im_end|>\n"; break;
+            case TemplateType::Llama3: ss << "<|start_header_id|>" << role << "<|end_header_id|>\n\n" << content << "<|eot_id|>"; break;
+            case TemplateType::Phi3: ss << "<|" << role << "|>\n" << content << "<|end|>\n"; break;
+            case TemplateType::Gemma: ss << "<start_of_turn>" << (role=="assistant"?"model":role) << "\n" << content << "<end_of_turn>\n"; break;
+            case TemplateType::Llama2: if (role=="system") ss << "[INST] <<SYS>>\n" << content << "\n<</SYS>>\n\n"; else if (role=="user") ss << content << " [/INST] "; else ss << content << " </s><s>[INST] "; break;
+            default: ss << role << ": " << content << "\n";
+        }
+    }
+    if (add_generation_prompt) {
+        switch(type) {
+            case TemplateType::ChatML: ss << "<|im_start|>assistant\n"; break;
+            case TemplateType::Llama3: ss << "<|start_header_id|>assistant<|end_header_id|>\n\n"; break;
+            case TemplateType::Phi3: ss << "<|assistant|>\n"; break;
+            case TemplateType::Gemma: ss << "<start_of_turn>model\n"; break;
+            default: ss << "Assistant:";
+        }
+    }
+    tl_decoded_buffer = ss.str();
+    return tl_decoded_buffer.c_str();
+}
 
 std::unique_ptr<OgaTokenizerStream> OgaTokenizerStream::Create(const OgaTokenizer& tokenizer) {
     auto stream = std::make_unique<OgaTokenizerStream>();
     stream->tokenizer = &tokenizer;
-    stream->pending_tokens.clear();
-    stream->accumulated.clear();
     return stream;
 }
 
-
-/*
- * OgaTokenizerStream::Decode
- * 
- * Streaming decoder that returns incremental text for each token.
- */
 oga_char_ptr OgaTokenizerStream::Decode(int32_t token) {
-    pending_tokens.push_back(token);
-
-    std::string delta;
-    auto it = tokenizer->reverse_vocab.find(token);
-    if (it != tokenizer->reverse_vocab.end()) {
-        delta = it->second;
-    } else {
-        delta = "<unk>";
-    }
-
+    std::string delta = const_cast<OgaTokenizer*>(tokenizer)->Decode(&token, 1);
     accumulated += delta;
     decoded_buffer = delta;
     return decoded_buffer.c_str();

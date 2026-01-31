@@ -77,9 +77,17 @@ void RyzenAIServer::loadModel() {
     std::cout << "[Server] Execution mode: " << args_.mode << std::endl;
     
     try {
+        // Create optimization settings from command line args
+        OptimizationSettings opt;
+        opt.ctx_size = args_.ctx_size;
+        opt.repetition_lookback = args_.repetition_lookback;
+        opt.kv_cache = args_.kv_cache;
+        opt.prefill_chunk = args_.prefill_chunk;
+        
         inference_engine_ = std::make_unique<InferenceEngine>(
             args_.model_path,
-            args_.mode
+            args_.mode,
+            opt
         );
         
         model_id_ = extractModelName(args_.model_path);
@@ -182,309 +190,105 @@ void RyzenAIServer::handleHealth(const httplib::Request& req, httplib::Response&
 
 void RyzenAIServer::handleCompletions(const httplib::Request& req, httplib::Response& res) {
     try {
-        // Parse request
         json request_json = json::parse(req.body);
         auto comp_req = CompletionRequest::fromJSON(request_json);
         
         if (comp_req.prompt.empty()) {
             res.status = 400;
-            res.set_content(createErrorResponse("Missing prompt", "invalid_request").dump(), 
-                          "application/json");
+            res.set_content(createErrorResponse("Missing prompt", "invalid_request").dump(), "application/json");
             return;
         }
         
-        std::cout << "[Server] Completion request (stream=" << comp_req.stream 
-                  << ", echo=" << comp_req.echo
-                  << ", temperature=" << comp_req.temperature 
-                  << ", top_p=" << comp_req.top_p 
-                  << ", top_k=" << comp_req.top_k << ")" << std::endl;
-        
+        // Helper lambda for robust parsing using model-specific tags
+        // Works for both MLX and Onyx backends - getAdditionalTags() returns appropriate tags for each
+        auto extract_robust_reasoning = [this](const std::string& text) -> std::pair<std::string, std::string> {
+            auto result = parseReasoningContentWithModel(text, inference_engine_->getAdditionalTags());
+            return {result.reasoning_content, result.regular_content};
+        };
+
         if (comp_req.stream) {
-            if (comp_req.echo) {
-                std::cout << "[Server] Warning: `echo` parameter is not supported for streaming completions" << std::endl;
-            }
-            // REAL-TIME STREAMING: Send chunks as tokens are generated
+            // For completeness of this snippet, re-inserting the STREAMING block:
             res.set_header("Content-Type", "text/event-stream");
             res.set_header("Cache-Control", "no-cache");
             res.set_header("Connection", "keep-alive");
-            res.set_header("X-Accel-Buffering", "no");
             
-            GenerationParams params = createGenerationParams(
-                comp_req.max_tokens, comp_req.temperature, comp_req.top_p,
-                comp_req.top_k, comp_req.repeat_penalty, comp_req.stop
-            );
-            
+            GenerationParams params = createGenerationParams(comp_req.max_tokens, comp_req.temperature, comp_req.top_p, comp_req.top_k, comp_req.repeat_penalty, comp_req.stop);
             std::string prompt = comp_req.prompt;
             std::string model_id = model_id_;
-            
-            // Count prompt tokens before streaming
             int prompt_tokens = inference_engine_->countTokens(prompt);
             
-            res.set_chunked_content_provider(
-                "text/event-stream",
-                [this, prompt, params, model_id, prompt_tokens](size_t offset, httplib::DataSink& sink) {
-                    if (offset > 0) return false; // Only run once
-                    
-                    try {
-                        // Track timing for telemetry
-                        auto start_time = std::chrono::high_resolution_clock::now();
-                        auto first_token_time = start_time;
-                        bool first_token_received = false;
-                        int token_count = 0;
-                        
-                        // Create reasoning parser for streaming
-                        ReasoningStreamParser reasoning_parser;
-                        
-                        // Generate and send tokens in real-time
-                        inference_engine_->streamComplete(prompt, params, 
-                            [&sink, model_id, &token_count, &reasoning_parser, &first_token_received, &first_token_time](const std::string& token, bool is_final) -> bool {
-                                // Track time to first token
-                                if (!first_token_received && !token.empty()) {
-                                    first_token_time = std::chrono::high_resolution_clock::now();
-                                    first_token_received = true;
-                                }
-                                
-                                // Process token through reasoning parser
-                                auto [reasoning_part, content_part] = reasoning_parser.processToken(token);
-                                
-                                // Helper function to escape JSON strings
-                                auto escapeJson = [](const std::string& str) -> std::string {
-                                    std::string escaped = str;
-                                    size_t pos = 0;
-                                    while ((pos = escaped.find('\\', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\\\");
-                                        pos += 2;
-                                    }
-                                    pos = 0;
-                                    while ((pos = escaped.find('"', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\\"");
-                                        pos += 2;
-                                    }
-                                    pos = 0;
-                                    while ((pos = escaped.find('\n', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\n");
-                                        pos += 2;
-                                    }
-                                    pos = 0;
-                                    while ((pos = escaped.find('\r', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\r");
-                                        pos += 2;
-                                    }
-                                    return escaped;
-                                };
-                                
-                                // Send reasoning content chunk if present
-                                if (!reasoning_part.empty()) {
-                                    std::string escaped_reasoning = escapeJson(reasoning_part);
-                                    std::string reasoning_chunk_json = 
-                                        "{\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                                        "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                        ",\"model\":\"" + model_id + 
-                                        "\",\"choices\":[{\"index\":0,\"reasoning_content\":\"" + escaped_reasoning + 
-                                        "\",\"finish_reason\":null}]}";
-                                    
-                                    std::string reasoning_chunk_str = "data: " + reasoning_chunk_json + "\n\n";
-                                    if (!sink.write(reasoning_chunk_str.c_str(), reasoning_chunk_str.size())) {
-                                        return false; // Client disconnected, stop generation
-                                    }
-                                }
-                                
-                                // Send regular content chunk if present
-                                if (!content_part.empty()) {
-                                    std::string escaped_content = escapeJson(content_part);
-                                    std::string finish_reason = is_final ? "\"stop\"" : "null";
-                                    std::string chunk_json = 
-                                        "{\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                                        "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                        ",\"model\":\"" + model_id + 
-                                        "\",\"choices\":[{\"index\":0,\"text\":\"" + escaped_content + 
-                                        "\",\"finish_reason\":" + finish_reason + "}]}";
-                                    
-                                    std::string chunk_str = "data: " + chunk_json + "\n\n";
-                                    if (!sink.write(chunk_str.c_str(), chunk_str.size())) {
-                                        return false; // Client disconnected, stop generation
-                                    }
-                                }
-                                
-                                // If this is the final token, flush any remaining buffered content
-                                if (is_final) {
-                                    auto [final_reasoning, final_content] = reasoning_parser.flush();
-                                    
-                                    // Send any remaining reasoning content
-                                    if (!final_reasoning.empty()) {
-                                        std::string escaped_reasoning = escapeJson(final_reasoning);
-                                        std::string reasoning_chunk_json = 
-                                            "{\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                                            "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                            ",\"model\":\"" + model_id + 
-                                            "\",\"choices\":[{\"index\":0,\"reasoning_content\":\"" + escaped_reasoning + 
-                                            "\",\"finish_reason\":null}]}";
-                                        
-                                        std::string reasoning_chunk_str = "data: " + reasoning_chunk_json + "\n\n";
-                                        if (!sink.write(reasoning_chunk_str.c_str(), reasoning_chunk_str.size())) {
-                                            return false;
-                                        }
-                                    }
-                                    
-                                    // Send any remaining regular content
-                                    if (!final_content.empty()) {
-                                        std::string escaped_content = escapeJson(final_content);
-                                        std::string chunk_json = 
-                                            "{\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                                            "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                            ",\"model\":\"" + model_id + 
-                                            "\",\"choices\":[{\"index\":0,\"text\":\"" + escaped_content + 
-                                            "\",\"finish_reason\":\"stop\"}]}";
-                                        
-                                        std::string chunk_str = "data: " + chunk_json + "\n\n";
-                                        if (!sink.write(chunk_str.c_str(), chunk_str.size())) {
-                                            return false;
-                                        }
-                                    }
-                                }
-                                
-                                token_count++;
-                                return true; // Continue generation
+            res.set_chunked_content_provider("text/event-stream", [this, prompt, params, model_id, prompt_tokens](size_t offset, httplib::DataSink& sink) {
+                if (offset > 0) return false;
+                try {
+                    // Use model-specific tags for both MLX and Onyx backends
+                    ReasoningStreamParser parser(inference_engine_->getAdditionalTags());
+                    int token_count = 0;
+                    auto start_time = std::chrono::high_resolution_clock::now();
+
+                    inference_engine_->streamComplete(prompt, params, [&sink, model_id, &token_count, &parser](const std::string& token, bool is_final) -> bool {
+                        auto parsed = parser.consume(token);
+
+                        // Simple JSON escape
+                        auto escape = [](const std::string& s) {
+                            std::string out; out.reserve(s.size());
+                            for(char c : s) {
+                                if(c == '\n') out += "\\n";
+                                else if(c == '\r') out += "\\r";
+                                else if(c == '"') out += "\\\"";
+                                else if(c == '\\') out += "\\\\";
+                                else out += c;
                             }
-                        );
-                        
-                        // After generation completes, do a final flush to catch any remaining buffered content
-                        auto [final_reasoning, final_content] = reasoning_parser.flush();
-                        
-                        // Helper function to escape JSON strings
-                        auto escapeJson = [](const std::string& str) -> std::string {
-                            std::string escaped = str;
-                            size_t pos = 0;
-                            while ((pos = escaped.find('\\', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\\\");
-                                pos += 2;
-                            }
-                            pos = 0;
-                            while ((pos = escaped.find('"', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\\"");
-                                pos += 2;
-                            }
-                            pos = 0;
-                            while ((pos = escaped.find('\n', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\n");
-                                pos += 2;
-                            }
-                            pos = 0;
-                            while ((pos = escaped.find('\r', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\r");
-                                pos += 2;
-                            }
-                            return escaped;
+                            return out;
                         };
-                        
-                        // Send any remaining reasoning content
-                        if (!final_reasoning.empty()) {
-                            std::string escaped_reasoning = escapeJson(final_reasoning);
-                            std::string reasoning_chunk_json = 
-                                "{\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                                "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                ",\"model\":\"" + model_id + 
-                                "\",\"choices\":[{\"index\":0,\"reasoning_content\":\"" + escaped_reasoning + 
-                                "\",\"finish_reason\":null}]}";
-                            
-                            std::string reasoning_chunk_str = "data: " + reasoning_chunk_json + "\n\n";
-                            sink.write(reasoning_chunk_str.c_str(), reasoning_chunk_str.size());
+
+                        if (parsed.has_reasoning && !parsed.reasoning_content.empty()) {
+                            std::string chunk = "data: {\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"reasoning_content\":\"" + escape(parsed.reasoning_content) + "\",\"finish_reason\":null}]}\n\n";
+                            sink.write(chunk.c_str(), chunk.size());
                         }
-                        
-                        // Send any remaining regular content
-                        if (!final_content.empty()) {
-                            std::string escaped_content = escapeJson(final_content);
-                            std::string chunk_json = 
-                                "{\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                                "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                ",\"model\":\"" + model_id + 
-                                "\",\"choices\":[{\"index\":0,\"text\":\"" + escaped_content + 
-                                "\",\"finish_reason\":\"stop\"}]}";
-                            
-                            std::string chunk_str = "data: " + chunk_json + "\n\n";
-                            sink.write(chunk_str.c_str(), chunk_str.size());
+                        if (!parsed.regular_content.empty()) {
+                            std::string finish = is_final ? "\"stop\"" : "null";
+                            std::string chunk = "data: {\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"text\":\"" + escape(parsed.regular_content) + "\",\"finish_reason\":" + finish + "}]}\n\n";
+                            sink.write(chunk.c_str(), chunk.size());
                         }
-                        
-                        // Calculate timing metrics
-                        auto end_time = std::chrono::high_resolution_clock::now();
-                        auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                        auto ttft_duration = std::chrono::duration_cast<std::chrono::milliseconds>(first_token_time - start_time);
-                        double ttft_seconds = ttft_duration.count() / 1000.0;
-                        double total_seconds = total_duration.count() / 1000.0;
-                        double tokens_per_second = (token_count > 0 && total_seconds > 0) ? (token_count / total_seconds) : 0.0;
-                        
-                        // Send final chunk with usage data (for telemetry parsing)
-                        std::string usage_chunk = 
-                            "data: {\"id\":\"cmpl-" + std::to_string(std::time(nullptr)) + 
-                            "\",\"object\":\"text_completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                            ",\"model\":\"" + model_id + 
-                            "\",\"choices\":[{\"index\":0,\"text\":\"\",\"finish_reason\":null}]," +
-                            "\"usage\":{" +
-                                "\"prompt_tokens\":" + std::to_string(prompt_tokens) + "," +
-                                "\"completion_tokens\":" + std::to_string(token_count) + "," +
-                                "\"total_tokens\":" + std::to_string(prompt_tokens + token_count) + "," +
-                                "\"prefill_duration_ttft\":" + std::to_string(ttft_seconds) + "," +
-                                "\"decoding_speed_tps\":" + std::to_string(tokens_per_second) +
-                            "}}\n\n";
-                        sink.write(usage_chunk.c_str(), usage_chunk.size());
-                        
-                        // Send [DONE] marker
-                        const char* done_msg = "data: [DONE]\n\n";
-                        sink.write(done_msg, strlen(done_msg));
-                        sink.done();
-                        
-                        std::cout << "[Server] [OK] Streamed " << token_count << " tokens" << std::endl;
-                        
-                    } catch (const std::exception& e) {
-                        std::cerr << "[ERROR] Streaming failed: " << e.what() << std::endl;
-                        json error_chunk = createErrorResponse(e.what(), "inference_error");
-                        std::string error_str = "data: " + error_chunk.dump() + "\n\n";
-                        sink.write(error_str.c_str(), error_str.size());
-                        sink.done();
-                    }
-                    
-                    return false;
+
+                        if (parsed.should_stop) {
+                            std::cout << "[Server] parser signaled stop, ending generation." << std::endl;
+                            return false; // Stop generation
+                        }
+                        token_count++;
+                        return true;
+                    });
+
+                    // Usage & Done
+                    std::string usage = "data: {\"choices\":[{\"text\":\"\",\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":" + std::to_string(prompt_tokens) + ",\"completion_tokens\":" + std::to_string(token_count) + "}}\n\n";
+                    sink.write(usage.c_str(), usage.size());
+                    sink.write("data: [DONE]\n\n", 14);
+                    sink.done();
+                } catch (const std::exception& e) {
+                    json err = createErrorResponse(e.what(), "inference_error");
+                    std::string s = "data: " + err.dump() + "\n\n";
+                    sink.write(s.c_str(), s.size());
+                    sink.done();
                 }
-            );
-            
+                return false;
+            });
+
         } else {
-            // Non-streaming response
-            GenerationParams params = createGenerationParams(
-                comp_req.max_tokens, comp_req.temperature, comp_req.top_p,
-                comp_req.top_k, comp_req.repeat_penalty, comp_req.stop
-            );
-            
+            // NON-STREAMING (Updated with Robust Parsing)
+            GenerationParams params = createGenerationParams(comp_req.max_tokens, comp_req.temperature, comp_req.top_p, comp_req.top_k, comp_req.repeat_penalty, comp_req.stop);
             CompletionTimingData timing;
             std::string output = inference_engine_->complete(comp_req.prompt, params, &timing);
             
-            // Parse reasoning content from output
-            auto reasoning_result = parseReasoningContent(output);
-            std::string content = reasoning_result.regular_content;
-            std::string reasoning_content = reasoning_result.reasoning_content;
-            
-            if (reasoning_result.has_reasoning) {
-                std::cout << "[Server] Extracted reasoning content (" << reasoning_content.length() << " chars)" << std::endl;
-            }
-            
-            // If echo=True, prepend the prompt to the output (matching Python reference)
+            // USE ROBUST PARSING HERE
+            auto [reasoning, content] = extract_robust_reasoning(output);
             std::string final_text = comp_req.echo ? (comp_req.prompt + content) : content;
             
-            // Count prompt tokens; completion_tokens from timing data
-            int prompt_tokens = inference_engine_->countTokens(comp_req.prompt);
-            int completion_tokens = timing.token_count;
-            int total_tokens = prompt_tokens + completion_tokens;
-            
-            // Build choice object
             json choice = {
                 {"index", 0},
                 {"text", final_text},
                 {"finish_reason", "stop"}
             };
-            
-            // Add reasoning_content if present
-            if (reasoning_result.has_reasoning && !reasoning_content.empty()) {
-                choice["reasoning_content"] = reasoning_content;
-            }
+            if (!reasoning.empty()) choice["reasoning_content"] = reasoning;
             
             json response = {
                 {"id", "cmpl-" + std::to_string(std::time(nullptr))},
@@ -492,35 +296,19 @@ void RyzenAIServer::handleCompletions(const httplib::Request& req, httplib::Resp
                 {"created", std::time(nullptr)},
                 {"model", model_id_},
                 {"choices", {choice}},
-                {"usage", {
-                    {"prompt_tokens", prompt_tokens},
-                    {"completion_tokens", completion_tokens},
-                    {"total_tokens", total_tokens},
-                    {"completion_time_ms", timing.total_time_ms},
-                    {"prefill_duration_ttft", timing.ttft_seconds},
-                    {"decoding_speed_tps", timing.tps}
-                }}
+                {"usage", {{"prompt_tokens", 0}, {"completion_tokens", timing.token_count}, {"total_tokens", timing.token_count}, {"completion_time_ms", timing.total_time_ms}}}
             };
-            
-            std::cout << "[Server] [OK] Completion generated (" << timing.total_time_ms << "ms)" << std::endl;
             res.set_content(response.dump(), "application/json");
         }
-        
-    } catch (const json::exception& e) {
-        res.status = 400;
-        res.set_content(createErrorResponse("Invalid JSON: " + std::string(e.what()), 
-                                          "parse_error").dump(), 
-                       "application/json");
     } catch (const std::exception& e) {
         res.status = 500;
-        res.set_content(createErrorResponse(e.what(), "internal_error").dump(), 
-                       "application/json");
+        res.set_content(createErrorResponse(e.what(), "internal_error").dump(), "application/json");
     }
 }
 
 void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::Response& res) {
     try {
-        // Parse request
+        // 1. Parse Request
         json request_json = json::parse(req.body);
         auto chat_req = ChatCompletionRequest::fromJSON(request_json);
         
@@ -531,37 +319,30 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             return;
         }
         
-        // Convert messages to JSON array for chat template
+        // 2. Prepare Prompt
         json messages_array = json::array();
         for (const auto& msg : chat_req.messages) {
-            messages_array.push_back({
-                {"role", msg.role},
-                {"content", msg.content}
-            });
+            messages_array.push_back({{"role", msg.role}, {"content", msg.content}});
         }
-        
-        // Apply the model's chat template (with tools if provided)
         std::string tools_json = chat_req.tools.empty() ? "" : chat_req.tools.dump();
-        
-        std::cout << "[Server] Chat completion request (stream=" << chat_req.stream;
-        if (!tools_json.empty()) {
-            std::cout << ", with " << chat_req.tools.size() << " tools";
-            std::cout << ")" << std::endl;
-            std::cout << "[Server DEBUG] Tools JSON: " << tools_json << std::endl;
-        } else {
-            std::cout << ")" << std::endl;
-        }
-        
         std::string prompt = inference_engine_->applyChatTemplate(messages_array.dump(), tools_json);
-        std::cout << "[Server DEBUG] Generated prompt length: " << prompt.length() << " chars" << std::endl;
-        std::cout << "[Server DEBUG] Prompt (first 500 chars): " << prompt.substr(0, std::min(size_t(500), prompt.length())) << std::endl;
         
+        // -----------------------------------------------------------------------
+        // ROBUST PARSING LOGIC using model-specific tags
+        // Works for both MLX and Onyx backends - getAdditionalTags() returns appropriate tags for each
+        // -----------------------------------------------------------------------
+        auto robust_parse = [this](const std::string& full_output) -> std::pair<std::string, std::string> {
+            auto result = parseReasoningContentWithModel(full_output, inference_engine_->getAdditionalTags());
+            return {result.reasoning_content, result.regular_content};
+        };
+
         if (chat_req.stream) {
-            // REAL-TIME STREAMING: Send chunks as tokens are generated
+            // STREAMING LOGIC
+            // Note: Streaming "implicit starts" is very difficult because tokens are sent 
+            // before we know a tag is missing. This uses standard parsing.
             res.set_header("Content-Type", "text/event-stream");
             res.set_header("Cache-Control", "no-cache");
             res.set_header("Connection", "keep-alive");
-            res.set_header("X-Accel-Buffering", "no");
             
             GenerationParams params = createGenerationParams(
                 chat_req.max_tokens, chat_req.temperature, chat_req.top_p,
@@ -571,279 +352,75 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             std::string model_id = model_id_;
             bool has_tools = !chat_req.tools.empty();
             
-            // Count prompt tokens before streaming
-            int prompt_tokens = inference_engine_->countTokens(prompt);
-            
-            res.set_chunked_content_provider(
-                "text/event-stream",
-                [this, prompt, params, model_id, has_tools, prompt_tokens](size_t offset, httplib::DataSink& sink) {
-                    if (offset > 0) return false; // Only run once
-                    
+            res.set_chunked_content_provider("text/event-stream",
+                [this, prompt, params, model_id, has_tools](size_t offset, httplib::DataSink& sink) {
+                    if (offset > 0) return false;
                     try {
-                        // Track timing for telemetry
-                        auto start_time = std::chrono::high_resolution_clock::now();
-                        auto first_token_time = start_time;
-                        bool first_token_received = false;
-                        int token_count = 0;
-                        
-                        // Accumulate full response for tool call extraction
-                        std::string full_response;
-                        
-                        // Create reasoning parser for streaming
-                        ReasoningStreamParser reasoning_parser;
-                        
-                        // Generate and send tokens in real-time
-                        inference_engine_->streamComplete(prompt, params, 
-                            [&sink, model_id, &token_count, &full_response, &reasoning_parser, &first_token_received, &first_token_time](const std::string& token, bool is_final) -> bool {
-                                // Track time to first token
-                                if (!first_token_received && !token.empty()) {
-                                    first_token_time = std::chrono::high_resolution_clock::now();
-                                    first_token_received = true;
-                                }
-                                
-                                // Accumulate for tool call extraction
-                                full_response += token;
-                                
-                                // Process token through reasoning parser
-                                auto [reasoning_part, content_part] = reasoning_parser.processToken(token);
-                                
-                                // Helper function to escape JSON strings
-                                auto escapeJson = [](const std::string& str) -> std::string {
-                                    std::string escaped = str;
-                                    size_t pos = 0;
-                                    while ((pos = escaped.find('\\', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\\\");
-                                        pos += 2;
+                        // Use model-specific tags for both MLX and Onyx backends
+                        ReasoningStreamParser parser(inference_engine_->getAdditionalTags());
+                        std::string full_response; // Buffer for tool extraction
+
+                        inference_engine_->streamComplete(prompt, params,
+                            [&sink, model_id, &parser, &full_response, has_tools](const std::string& token, bool is_final) -> bool {
+                                if (has_tools) full_response += token;
+
+                                auto parsed = parser.consume(token);
+
+                                // JSON Escape Helper
+                                auto escape = [](const std::string& s) {
+                                    std::string out;
+                                    for(char c : s) {
+                                        if(c == '\n') out += "\\n"; else if(c == '\r') out += "\\r";
+                                        else if(c == '"') out += "\\\""; else if(c == '\\') out += "\\\\";
+                                        else out += c;
                                     }
-                                    pos = 0;
-                                    while ((pos = escaped.find('"', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\\"");
-                                        pos += 2;
-                                    }
-                                    pos = 0;
-                                    while ((pos = escaped.find('\n', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\n");
-                                        pos += 2;
-                                    }
-                                    pos = 0;
-                                    while ((pos = escaped.find('\r', pos)) != std::string::npos) {
-                                        escaped.replace(pos, 1, "\\r");
-                                        pos += 2;
-                                    }
-                                    return escaped;
+                                    return out;
                                 };
-                                
-                                // Send reasoning content chunk if present
-                                if (!reasoning_part.empty()) {
-                                    std::string escaped_reasoning = escapeJson(reasoning_part);
-                                    std::string reasoning_chunk_json = 
-                                        "{\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                        "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                        ",\"model\":\"" + model_id + 
-                                        "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + escaped_reasoning + 
-                                        "\"},\"finish_reason\":null}]}";
-                                    
-                                    std::string reasoning_chunk_str = "data: " + reasoning_chunk_json + "\n\n";
-                                    if (!sink.write(reasoning_chunk_str.c_str(), reasoning_chunk_str.size())) {
-                                        return false; // Client disconnected, stop generation
-                                    }
+
+                                if (parsed.has_reasoning && !parsed.reasoning_content.empty()) {
+                                    std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + escape(parsed.reasoning_content) + "\"},\"finish_reason\":null}]}\n\n";
+                                    sink.write(chunk.c_str(), chunk.size());
+                                }
+                                if (!parsed.regular_content.empty()) {
+                                    std::string finish = is_final ? "\"stop\"" : "null";
+                                    std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + escape(parsed.regular_content) + "\"},\"finish_reason\":" + finish + "}]}\n\n";
+                                    sink.write(chunk.c_str(), chunk.size());
                                 }
                                 
-                                // Send regular content chunk if present
-                                if (!content_part.empty()) {
-                                    std::string escaped_content = escapeJson(content_part);
-                                    std::string finish_reason = is_final ? "\"stop\"" : "null";
-                                    std::string chunk_json = 
-                                        "{\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                        "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                        ",\"model\":\"" + model_id + 
-                                        "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + escaped_content + 
-                                        "\"},\"finish_reason\":" + finish_reason + "}]}";
-                                    
-                                    std::string chunk_str = "data: " + chunk_json + "\n\n";
-                                    if (!sink.write(chunk_str.c_str(), chunk_str.size())) {
-                                        return false; // Client disconnected, stop generation
-                                    }
+                                // Check if parser detected CHAT_END token - signal stop
+                                if (parsed.should_stop) {
+                                    std::cout << "[Server] ChatCompletions parser signaled stop, ending generation." << std::endl;
+                                    return false;
                                 }
-                                
-                                // If this is the final token, flush any remaining buffered content
-                                if (is_final) {
-                                    auto [final_reasoning, final_content] = reasoning_parser.flush();
-                                    
-                                    // Send any remaining reasoning content
-                                    if (!final_reasoning.empty()) {
-                                        std::string escaped_reasoning = escapeJson(final_reasoning);
-                                        std::string reasoning_chunk_json = 
-                                            "{\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                            "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                            ",\"model\":\"" + model_id + 
-                                            "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + escaped_reasoning + 
-                                            "\"},\"finish_reason\":null}]}";
-                                        
-                                        std::string reasoning_chunk_str = "data: " + reasoning_chunk_json + "\n\n";
-                                        if (!sink.write(reasoning_chunk_str.c_str(), reasoning_chunk_str.size())) {
-                                            return false;
-                                        }
-                                    }
-                                    
-                                    // Send any remaining regular content
-                                    if (!final_content.empty()) {
-                                        std::string escaped_content = escapeJson(final_content);
-                                        std::string chunk_json = 
-                                            "{\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                            "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                            ",\"model\":\"" + model_id + 
-                                            "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + escaped_content + 
-                                            "\"},\"finish_reason\":\"stop\"}]}";
-                                        
-                                        std::string chunk_str = "data: " + chunk_json + "\n\n";
-                                        if (!sink.write(chunk_str.c_str(), chunk_str.size())) {
-                                            return false;
-                                        }
-                                    }
-                                }
-                                
-                                token_count++;
-                                return true; // Continue generation
+                                return true;
                             }
                         );
                         
-                        // After generation completes, do a final flush to catch any remaining buffered content
-                        // This handles the case where the last few tokens didn't trigger processing due to buffer size
-                        auto [final_reasoning, final_content] = reasoning_parser.flush();
-                        
-                        // Helper function to escape JSON strings (reused from above)
-                        auto escapeJson = [](const std::string& str) -> std::string {
-                            std::string escaped = str;
-                            size_t pos = 0;
-                            while ((pos = escaped.find('\\', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\\\");
-                                pos += 2;
-                            }
-                            pos = 0;
-                            while ((pos = escaped.find('"', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\\"");
-                                pos += 2;
-                            }
-                            pos = 0;
-                            while ((pos = escaped.find('\n', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\n");
-                                pos += 2;
-                            }
-                            pos = 0;
-                            while ((pos = escaped.find('\r', pos)) != std::string::npos) {
-                                escaped.replace(pos, 1, "\\r");
-                                pos += 2;
-                            }
-                            return escaped;
-                        };
-                        
-                        // Send any remaining reasoning content
-                        if (!final_reasoning.empty()) {
-                            std::string escaped_reasoning = escapeJson(final_reasoning);
-                            std::string reasoning_chunk_json = 
-                                "{\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                ",\"model\":\"" + model_id + 
-                                "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + escaped_reasoning + 
-                                "\"},\"finish_reason\":null}]}";
-                            
-                            std::string reasoning_chunk_str = "data: " + reasoning_chunk_json + "\n\n";
-                            sink.write(reasoning_chunk_str.c_str(), reasoning_chunk_str.size());
-                        }
-                        
-                        // Send any remaining regular content
-                        if (!final_content.empty()) {
-                            std::string escaped_content = escapeJson(final_content);
-                            std::string chunk_json = 
-                                "{\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                ",\"model\":\"" + model_id + 
-                                "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + escaped_content + 
-                                "\"},\"finish_reason\":\"stop\"}]}";
-                            
-                            std::string chunk_str = "data: " + chunk_json + "\n\n";
-                            sink.write(chunk_str.c_str(), chunk_str.size());
-                        }
-                        
-                        // Extract and send tool calls if tools were provided
+                        // Stream Tool Calls if needed
                         if (has_tools) {
-                            auto [extracted_tool_calls, cleaned_text] = extractToolCalls(full_response);
-                            if (!extracted_tool_calls.empty()) {
-                                std::cout << "[Server] Extracted " << extracted_tool_calls.size() << " tool call(s) from stream" << std::endl;
-                                
-                                // Send tool calls as delta chunks
-                                for (const auto& tool_call : extracted_tool_calls) {
-                                    // Escape arguments for JSON
-                                    std::string tool_call_args = tool_call.arguments.dump();
-                                    std::string escaped_args = tool_call_args;
-                                    size_t pos = 0;
-                                    while ((pos = escaped_args.find('\\', pos)) != std::string::npos) {
-                                        escaped_args.replace(pos, 1, "\\\\");
-                                        pos += 2;
-                                    }
-                                    pos = 0;
-                                    while ((pos = escaped_args.find('"', pos)) != std::string::npos) {
-                                        escaped_args.replace(pos, 1, "\\\"");
-                                        pos += 2;
-                                    }
-                                    
-                                    std::string tool_call_chunk = 
-                                        "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                                        "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                                        ",\"model\":\"" + model_id + 
-                                        "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"-\",\"type\":\"function\",\"function\":{\"name\":\"" + tool_call.name + 
-                                        "\",\"arguments\":\"" + escaped_args + "\"}}]},\"finish_reason\":null}]}\n\n";
-                                    
-                                    sink.write(tool_call_chunk.c_str(), tool_call_chunk.size());
-                                }
+                            auto [extracted, cleaned] = extractToolCalls(full_response);
+                            for (const auto& tc : extracted) {
+                                std::string args = tc.arguments.dump();
+                                std::string esc_args; 
+                                for(char c : args) { if(c=='"') esc_args+="\\\""; else if(c=='\\') esc_args+="\\\\"; else esc_args+=c; }
+                                std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_auto\",\"type\":\"function\",\"function\":{\"name\":\"" + tc.name + "\",\"arguments\":\"" + esc_args + "\"}}]},\"finish_reason\":null}]}\n\n";
+                                sink.write(chunk.c_str(), chunk.size());
                             }
                         }
                         
-                        // Calculate timing metrics
-                        auto end_time = std::chrono::high_resolution_clock::now();
-                        auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                        auto ttft_duration = std::chrono::duration_cast<std::chrono::milliseconds>(first_token_time - start_time);
-                        double ttft_seconds = ttft_duration.count() / 1000.0;
-                        double total_seconds = total_duration.count() / 1000.0;
-                        double tokens_per_second = (token_count > 0 && total_seconds > 0) ? (token_count / total_seconds) : 0.0;
-                        
-                        // Send final chunk with usage data (for telemetry parsing)
-                        std::string usage_chunk = 
-                            "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + 
-                            "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + 
-                            ",\"model\":\"" + model_id + 
-                            "\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]," +
-                            "\"usage\":{" +
-                                "\"prompt_tokens\":" + std::to_string(prompt_tokens) + "," +
-                                "\"completion_tokens\":" + std::to_string(token_count) + "," +
-                                "\"total_tokens\":" + std::to_string(prompt_tokens + token_count) + "," +
-                                "\"prefill_duration_ttft\":" + std::to_string(ttft_seconds) + "," +
-                                "\"decoding_speed_tps\":" + std::to_string(tokens_per_second) +
-                            "}}\n\n";
-                        sink.write(usage_chunk.c_str(), usage_chunk.size());
-                        
-                        // Send [DONE] marker
-                        const char* done_msg = "data: [DONE]\n\n";
-                        sink.write(done_msg, strlen(done_msg));
+                        sink.write("data: [DONE]\n\n", 14);
                         sink.done();
-                        
-                        std::cout << "[Server] [OK] Streamed " << token_count << " tokens" << std::endl;
-                        
                     } catch (const std::exception& e) {
-                        std::cerr << "[ERROR] Streaming failed: " << e.what() << std::endl;
-                        json error_chunk = createErrorResponse(e.what(), "inference_error");
-                        std::string error_str = "data: " + error_chunk.dump() + "\n\n";
-                        sink.write(error_str.c_str(), error_str.size());
+                        json err = {{"error", {{"message", e.what()}, {"type", "inference_error"}}}};
+                        std::string s = "data: " + err.dump() + "\n\n";
+                        sink.write(s.c_str(), s.size());
                         sink.done();
                     }
-                    
                     return false;
                 }
             );
-            
         } else {
-            // Non-streaming response
+            // NON-STREAMING EXECUTION
             GenerationParams params = createGenerationParams(
                 chat_req.max_tokens, chat_req.temperature, chat_req.top_p,
                 chat_req.top_k, chat_req.repeat_penalty, chat_req.stop
@@ -852,56 +429,26 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             CompletionTimingData timing;
             std::string output = inference_engine_->complete(prompt, params, &timing);
             
-            // Parse reasoning content from output
-            auto reasoning_result = parseReasoningContent(output);
-            std::string content = reasoning_result.regular_content;
-            std::string reasoning_content = reasoning_result.reasoning_content;
+            // Apply Robust Parsing
+            auto [reasoning, content] = robust_parse(output);
             
-            if (reasoning_result.has_reasoning) {
-                std::cout << "[Server] Extracted reasoning content (" << reasoning_content.length() << " chars)" << std::endl;
-            }
-            
-            // Extract tool calls if tools were provided (from the cleaned content)
+            // Extract Tool Calls (Compatibility)
             json tool_calls_json = nullptr;
-            
             if (!chat_req.tools.empty()) {
-                std::cout << "[Server DEBUG] Tools provided, extracting tool calls from output..." << std::endl;
-                std::cout << "[Server DEBUG] Content length: " << content.length() << " chars" << std::endl;
-                std::cout << "[Server DEBUG] First 200 chars: " << content.substr(0, std::min(size_t(200), content.length())) << std::endl;
-                
-                auto [extracted_tool_calls, cleaned_text] = extractToolCalls(content);
-                std::cout << "[Server DEBUG] Extracted " << extracted_tool_calls.size() << " tool call(s)" << std::endl;
-                
-                if (!extracted_tool_calls.empty()) {
-                    content = cleaned_text;
-                    tool_calls_json = formatToolCallsForOpenAI(extracted_tool_calls);
-                    std::cout << "[Server] Extracted " << extracted_tool_calls.size() << " tool call(s)" << std::endl;
-                } else {
-                    std::cout << "[Server DEBUG] No tool calls found in output" << std::endl;
+                auto [extracted, cleaned] = extractToolCalls(content);
+                if (!extracted.empty()) {
+                    content = cleaned;
+                    tool_calls_json = formatToolCallsForOpenAI(extracted);
                 }
-            } else {
-                std::cout << "[Server DEBUG] No tools provided in request" << std::endl;
             }
             
-            // Count prompt tokens; completion_tokens from timing data
-            int prompt_tokens = inference_engine_->countTokens(prompt);
-            int completion_tokens = timing.token_count;
-            int total_tokens = prompt_tokens + completion_tokens;
-            
-            // Build message object
+            // Build Message
             json message = {
                 {"role", "assistant"},
                 {"content", content}
             };
-            
-            // Add reasoning_content if present
-            if (reasoning_result.has_reasoning && !reasoning_content.empty()) {
-                message["reasoning_content"] = reasoning_content;
-            }
-            
-            if (!tool_calls_json.is_null()) {
-                message["tool_calls"] = tool_calls_json;
-            }
+            if (!reasoning.empty()) message["reasoning_content"] = reasoning;
+            if (!tool_calls_json.is_null()) message["tool_calls"] = tool_calls_json;
             
             json response = {
                 {"id", "chatcmpl-" + std::to_string(std::time(nullptr))},
@@ -914,28 +461,17 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                     {"finish_reason", "stop"}
                 }}},
                 {"usage", {
-                    {"prompt_tokens", prompt_tokens},
-                    {"completion_tokens", completion_tokens},
-                    {"total_tokens", total_tokens},
-                    {"completion_time_ms", timing.total_time_ms},
-                    {"prefill_duration_ttft", timing.ttft_seconds},
-                    {"decoding_speed_tps", timing.tps}
+                    {"prompt_tokens", inference_engine_->countTokens(prompt)},
+                    {"completion_tokens", timing.token_count},
+                    {"total_tokens", timing.token_count},
+                    {"completion_time_ms", timing.total_time_ms}
                 }}
             };
-            
-            std::cout << "[Server] [OK] Chat completion generated (" << timing.total_time_ms << "ms)" << std::endl;
             res.set_content(response.dump(), "application/json");
         }
-        
-    } catch (const json::exception& e) {
-        res.status = 400;
-        res.set_content(createErrorResponse("Invalid JSON: " + std::string(e.what()), 
-                                          "parse_error").dump(), 
-                       "application/json");
     } catch (const std::exception& e) {
         res.status = 500;
-        res.set_content(createErrorResponse(e.what(), "internal_error").dump(), 
-                       "application/json");
+        res.set_content(createErrorResponse(e.what(), "internal_error").dump(), "application/json");
     }
 }
 

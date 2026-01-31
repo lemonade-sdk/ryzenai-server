@@ -17,6 +17,11 @@ struct CommandLineArgs {
     int ctx_size = 2048;              // --ctx-size
     int threads = 4;                  // --threads
     bool verbose = false;             // --verbose
+    
+    // Optimization parameters
+    int repetition_lookback = 64;     // --rep-lookback (tokens to check for repetition)
+    bool kv_cache = true;             // --kv-cache / --no-kv-cache
+    int prefill_chunk = 512;          // --prefill-chunk (tokens per chunk for long prompts)
 };
 
 // Chat message structure
