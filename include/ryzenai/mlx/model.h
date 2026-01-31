@@ -53,6 +53,10 @@ struct MlxOgaModel {
     // Context length (passed from command line or config)
     // Used to limit KV cache memory usage
     int max_context_length = 2048;
+    
+    // KV cache format (passed from command line)
+    // Controls memory vs precision trade-off
+    ryzenai::KVCacheMode kv_format = ryzenai::KVCacheMode::FP16;
 
     // Additional special tokens for streaming detection
     std::vector<AdditionalToken> additional_tags;

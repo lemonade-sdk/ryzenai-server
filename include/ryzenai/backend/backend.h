@@ -59,6 +59,7 @@ public:
     // Lifecycle
     virtual void loadModel(const std::string& model_path) = 0;
     virtual void setContextSize(int ctx_size) { (void)ctx_size; }  // Optional override for context size
+    virtual void setKVFormat(KVCacheMode format) { (void)format; }  // Optional override for KV cache format
     virtual BackendType getType() const = 0;
     virtual std::string getName() const = 0;
     virtual BackendCapabilities getCapabilities() const = 0;

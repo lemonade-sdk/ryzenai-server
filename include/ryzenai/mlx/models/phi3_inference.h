@@ -24,20 +24,14 @@
 #include "ryzenai/mlx/generator.h"
 #include "ryzenai/mlx/quantized_kv_cache.h"
 #include "ryzenai/mlx/layer_weights.h"
+#include "ryzenai/types.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
 #include <optional>
 
-
-/*
- * KV Cache quantization mode for Phi3
- */
-enum class KVCacheMode {
-    FP16,       // Original FP16 cache (higher accuracy, more bandwidth)
-    INT8,       // INT8 quantized cache (2x bandwidth reduction, slight accuracy loss)
-    INT4        // INT4 quantized cache (4x bandwidth reduction, more accuracy loss) [future]
-};
+// Use common KVCacheMode from types.h
+using ryzenai::KVCacheMode;
 
 class Phi3Inference : public BaseInferenceEngine {
 public:

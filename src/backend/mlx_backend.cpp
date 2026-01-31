@@ -64,6 +64,15 @@ void MlxBackend::setContextSize(int ctx_size) {
     }
 }
 
+void MlxBackend::setKVFormat(KVCacheMode format) {
+    if (model_) {
+        model_->kv_format = format;
+        const char* format_name = (format == KVCacheMode::INT8) ? "int8" : 
+                                  (format == KVCacheMode::INT4) ? "int4" : "fp16";
+        std::cout << "[MlxBackend] KV cache format set to: " << format_name << std::endl;
+    }
+}
+
 std::string MlxBackend::getName() const {
     switch (type_) {
         case BackendType::MLX_METAL: return "MLX-Metal";

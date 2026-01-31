@@ -147,6 +147,23 @@ CommandLineArgs CommandLineParser::parse(int argc, char* argv[]) {
         else if (arg == "--no-kv-cache") {
             args.kv_cache = false;
         }
+        else if (arg == "--kv-format") {
+            if (i + 1 < argc) {
+                std::string format = argv[++i];
+                if (format == "fp16") {
+                    args.kv_format = KVCacheMode::FP16;
+                } else if (format == "int8") {
+                    args.kv_format = KVCacheMode::INT8;
+                } else if (format == "int4") {
+                    args.kv_format = KVCacheMode::INT4;
+                } else {
+                    throw std::runtime_error("Invalid KV format: " + format + 
+                        " (valid options: fp16, int8, int4)");
+                }
+            } else {
+                throw std::runtime_error("Missing value for --kv-format");
+            }
+        }
         else if (arg == "--prefill-chunk") {
             flush_pending_model();
             if (i + 1 < argc) {
@@ -213,6 +230,7 @@ void CommandLineParser::printUsage(const char* program_name) {
     std::cout << "  --rep-lookback NUM        Repetition penalty lookback tokens (default: 64)\n";
     std::cout << "  --kv-cache                Enable KV cache (default: enabled)\n";
     std::cout << "  --no-kv-cache             Disable KV cache (slower but uses less memory)\n";
+    std::cout << "  --kv-format FORMAT        KV cache format: fp16 (default), int8 (2x savings), int4\n";
     std::cout << "  --prefill-chunk SIZE      Chunk size for long prompt prefill (default: 512)\n\n";
     
     std::cout << "Backend Types:\n";

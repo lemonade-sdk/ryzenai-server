@@ -147,17 +147,12 @@ std::unique_ptr<BaseInferenceEngine> create_inference_engine(const MlxOgaModel& 
 
     // Phi family
     if (model_type == "phi3") {
-        // Check environment variable for KV cache mode
-        // Set PHI3_KV_CACHE=int8 to test INT8 cache (slower on Apple Silicon due to quantization overhead)
-        const char* kv_mode_env = std::getenv("PHI3_KV_CACHE");
-        KVCacheMode kv_mode = KVCacheMode::FP16;  // Default: FP16 (faster on Apple Silicon)
+        // Use KV cache format from model (set via --kv-format command line option)
+        KVCacheMode kv_mode = model.kv_format;
         
-        if (kv_mode_env && std::string(kv_mode_env) == "int8") {
-            kv_mode = KVCacheMode::INT8;
-            std::cout << "[InferenceFactory] Using INT8 KV cache (experimental)" << std::endl;
-        } else {
-            std::cout << "[InferenceFactory] Using FP16 KV cache" << std::endl;
-        }
+        const char* format_name = (kv_mode == KVCacheMode::INT8) ? "INT8" : 
+                                  (kv_mode == KVCacheMode::INT4) ? "INT4" : "FP16";
+        std::cout << "[InferenceFactory] Using " << format_name << " KV cache" << std::endl;
         
         return std::make_unique<Phi3Inference>(model, kv_mode);
     }

@@ -36,6 +36,7 @@ struct OptimizationSettings {
     int ctx_size = 2048;              // --ctx-size
     int repetition_lookback = 64;     // --rep-lookback
     bool kv_cache = true;             // --kv-cache / --no-kv-cache
+    KVCacheMode kv_format = KVCacheMode::FP16;  // --kv-format (fp16|int8|int4)
     int prefill_chunk = 512;          // --prefill-chunk
 };
 

@@ -216,7 +216,8 @@ std::string InferenceEngine::loadModel(const std::string& model_path, BackendTyp
     
     // Apply context size from optimization settings
     backend->setContextSize(opt_settings_.ctx_size);
-    
+    backend->setKVFormat(opt_settings_.kv_format);
+
     // Create LoadedModel entry
     LoadedModel loaded;
     loaded.backend = std::move(backend);

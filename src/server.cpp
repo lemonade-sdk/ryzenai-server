@@ -113,6 +113,7 @@ void RyzenAIServer::loadModel() {
         OptimizationSettings opt;
         opt.ctx_size = args_.ctx_size;
         opt.repetition_lookback = args_.repetition_lookback;
+        opt.kv_format = args_.kv_format;
         opt.kv_cache = args_.kv_cache;
         opt.prefill_chunk = args_.prefill_chunk;
         

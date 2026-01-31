@@ -11,6 +11,17 @@ namespace ryzenai {
 using json = nlohmann::json;
 
 /*
+ * KV Cache quantization mode
+ * Controls memory usage vs precision trade-off for KV cache.
+ * INT8 provides ~2x memory savings, enabling longer contexts.
+ */
+enum class KVCacheMode {
+    FP16,       // Original FP16 cache (higher accuracy, faster on Apple Silicon)
+    INT8,       // INT8 quantized cache (2x memory savings, slight accuracy loss)
+    INT4        // INT4 quantized cache (4x memory savings, more accuracy loss) [experimental]
+};
+
+/*
  * Special token types for streaming detection
  */
 enum class SpecialTokenType {
@@ -56,6 +67,7 @@ struct CommandLineArgs {
     // Optimization parameters
     int repetition_lookback = 64;     // --rep-lookback (tokens to check for repetition)
     bool kv_cache = true;             // --kv-cache / --no-kv-cache
+    KVCacheMode kv_format = KVCacheMode::FP16;  // --kv-format (fp16|int8|int4)
     int prefill_chunk = 512;          // --prefill-chunk (tokens per chunk for long prompts)
 };
 

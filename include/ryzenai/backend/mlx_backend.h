@@ -24,6 +24,7 @@ public:
     // Lifecycle
     void loadModel(const std::string& model_path) override;
     void setContextSize(int ctx_size) override;
+    void setKVFormat(KVCacheMode format) override;
     BackendType getType() const override { return type_; }
     std::string getName() const override;
     BackendCapabilities getCapabilities() const override;
