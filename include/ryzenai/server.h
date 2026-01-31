@@ -34,6 +34,7 @@ private:
     void handleChatCompletions(const httplib::Request& req, httplib::Response& res);
     void handleResponses(const httplib::Request& req, httplib::Response& res);
     void handleModels(httplib::Response& res);
+    void handleModelById(const httplib::Request& req, httplib::Response& res);
     
     // Helper methods
     json createErrorResponse(const std::string& message, const std::string& type);

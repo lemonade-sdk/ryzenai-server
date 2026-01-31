@@ -2,10 +2,8 @@
 #include "ryzenai/tool_calls.h"
 #include "ryzenai/reasoning.h"
 #include <iostream>
-#include <sstream>
 #include <chrono>
-#include <iomanip>
-#include <thread>
+#include <algorithm>
 
 namespace ryzenai {
 
@@ -222,6 +220,11 @@ void RyzenAIServer::setupRoutes() {
     // Models endpoint - OpenAI compatible
     http_server_->Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
         handleModels(res);
+    });
+    
+    // Single model endpoint - OpenAI compatible (GET /v1/models/{model_id})
+    http_server_->Get(R"(/v1/models/(.+))", [this](const httplib::Request& req, httplib::Response& res) {
+        handleModelById(req, res);
     });
     
     // Root redirect
@@ -877,6 +880,87 @@ void RyzenAIServer::stop() {
         http_server_->stop();
         running_ = false;
     }
+}
+
+/**
+ * @brief Handles the OpenAI single model endpoint request.
+ *
+ * This function returns information about a specific model in OpenAI-compatible format,
+ * or returns a 404 error if the model is not found.
+ *
+ * @param req The HTTP request object containing the model ID in the path.
+ * @param res The HTTP response object to be populated with the model information.
+ */
+void RyzenAIServer::handleModelById(const httplib::Request& req, httplib::Response& res) {
+    // Extract model ID from path (regex capture group)
+    std::string model_id;
+    if (req.matches.size() > 1) {
+        model_id = req.matches[1].str();
+    }
+    
+    if (model_id.empty()) {
+        res.status = 400;
+        res.set_content(createErrorResponse("Model ID is required", "invalid_request").dump(), "application/json");
+        return;
+    }
+    
+    std::cout << "[Server] Model lookup request for: " << model_id << std::endl;
+    
+    // Check if the model is loaded
+    auto loaded_models = inference_engine_->getLoadedModels();
+    
+    // Try to find the model (exact match or partial match)
+    std::string found_model;
+    for (const auto& name : loaded_models) {
+        if (name == model_id) {
+            found_model = name;
+            break;
+        }
+        // Also check partial/case-insensitive match
+        std::string name_lower = name;
+        std::string id_lower = model_id;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        std::transform(id_lower.begin(), id_lower.end(), id_lower.begin(), ::tolower);
+        if (name_lower.find(id_lower) != std::string::npos || 
+            id_lower.find(name_lower) != std::string::npos) {
+            found_model = name;
+            break;
+        }
+    }
+    
+    if (found_model.empty()) {
+        // Model not found - return 404 with proper OpenAI-compatible error format
+        res.status = 404;
+        json error_response = {
+            {"error", {
+                {"message", "The model '" + model_id + "' does not exist"},
+                {"type", "invalid_request_error"},
+                {"param", "model"},
+                {"code", "model_not_found"}
+            }}
+        };
+        res.set_content(error_response.dump(), "application/json");
+        return;
+    }
+    
+    // Build model info response
+    json model_obj = {
+        {"id", found_model},
+        {"object", "model"},
+        {"created", std::time(nullptr)},
+        {"owned_by", "ryzenai-server"}
+    };
+    
+    // Add backend-specific info if available
+    try {
+        const auto* backend = inference_engine_->getBackendForModel(found_model);
+        model_obj["backend"] = backend->getName();
+        model_obj["max_context_length"] = backend->getMaxContextLength();
+    } catch (...) {
+        // Backend info not available
+    }
+    
+    res.set_content(model_obj.dump(2), "application/json");
 }
 
 /**

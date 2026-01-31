@@ -73,7 +73,33 @@ ChatCompletionRequest ChatCompletionRequest::fromJSON(const json& j) {
         for (const auto& msg : j["messages"]) {
             ChatMessage message;
             message.role = msg.value("role", "user");
-            message.content = msg.value("content", "");
+            
+            // Handle content which can be string or array (OpenAI multimodal format)
+            if (msg.contains("content")) {
+                if (msg["content"].is_string()) {
+                    message.content = msg["content"].get<std::string>();
+                } else if (msg["content"].is_array()) {
+                    // Multimodal format: array of content parts
+                    // Extract text from text parts, combine them
+                    std::ostringstream combined;
+                    for (const auto& part : msg["content"]) {
+                        if (part.is_object() && part.contains("type")) {
+                            std::string type = part["type"].get<std::string>();
+                            if (type == "text" && part.contains("text")) {
+                                combined << part["text"].get<std::string>();
+                            }
+                            // Note: image_url parts are ignored for now (text-only model)
+                        } else if (part.is_string()) {
+                            // Simple string in array
+                            combined << part.get<std::string>();
+                        }
+                    }
+                    message.content = combined.str();
+                } else if (msg["content"].is_null()) {
+                    message.content = "";
+                }
+            }
+            
             req.messages.push_back(message);
         }
     }

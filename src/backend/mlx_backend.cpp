@@ -7,10 +7,13 @@
 #include <ryzenai/backend/mlx_backend.h>
 #include <ryzenai/inference_engine.h>
 #include <ryzenai/mlx/mlx_oga.h>
+#include <mlx/device.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <chrono>
+#include <cmath>
 
 namespace ryzenai {
 
@@ -166,6 +169,59 @@ std::string MlxBackend::complete(const std::string& prompt, const GenerationPara
     size_t input_ids_count = sequences->SequenceCount(0);
     std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
     
+    // Validate input length against both:
+    // 1. User-configured --ctx-size
+    // 2. Hardware limit based on GPU's max buffer size
+    //
+    // Memory calculation for attention:
+    //   attention_memory = num_heads * seq_len^2 * bytes_per_element (FP16 = 2)
+    //   max_seq = sqrt(max_buffer / (num_heads * 2))
+    //
+    // We use 50% of max_buffer to leave room for KV cache and other allocations
+    int user_max_tokens = model_->max_context_length;
+    int hardware_max_tokens = user_max_tokens;  // Default to user setting
+    
+    try {
+        // Query GPU device info for max buffer length
+        auto device_info = mlx::core::device_info(mlx::core::Device(mlx::core::Device::gpu, 0));
+        auto it = device_info.find("max_buffer_length");
+        if (it != device_info.end()) {
+            size_t max_buffer = std::get<size_t>(it->second);
+            // Use 50% of max buffer for attention, leave rest for KV cache and weights
+            size_t available_for_attention = max_buffer / 2;
+            // attention_memory = num_heads * seq_len^2 * 2 (FP16)
+            int num_heads = model_->num_attention_heads;
+            // max_seq = sqrt(available / (num_heads * 2))
+            hardware_max_tokens = static_cast<int>(std::sqrt(
+                static_cast<double>(available_for_attention) / (num_heads * 2)
+            ));
+            
+            // Log only once on first request
+            static bool logged_once = false;
+            if (!logged_once) {
+                std::cout << "[MlxBackend] GPU max_buffer_length: " << (max_buffer / 1024 / 1024) << " MB, "
+                          << "calculated safe max context: " << hardware_max_tokens << " tokens" << std::endl;
+                logged_once = true;
+            }
+        }
+    } catch (...) {
+        // Could not get device info, use user setting
+    }
+    
+    int effective_max_tokens = std::min(user_max_tokens, hardware_max_tokens);
+    
+    if (static_cast<int>(input_ids.size()) > effective_max_tokens) {
+        std::ostringstream error;
+        error << "Input too large: " << input_ids.size() << " tokens exceeds safe maximum of " 
+              << effective_max_tokens << " tokens. ";
+        if (hardware_max_tokens < user_max_tokens) {
+            error << "Your GPU's max buffer (" << (hardware_max_tokens) 
+                  << " token limit) is smaller than configured --ctx-size (" << user_max_tokens << "). ";
+        }
+        error << "Please reduce your input.";
+        throw std::runtime_error(error.str());
+    }
+    
     // Setup generator params
     auto gen_params = MlxOgaGeneratorParams::Create(*model_);
     gen_params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + params.max_length);
@@ -276,6 +332,45 @@ void MlxBackend::streamComplete(const std::string& prompt, const GenerationParam
     const int32_t* input_ids_ptr = sequences->SequenceData(0);
     size_t input_ids_count = sequences->SequenceCount(0);
     std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
+    
+    // Validate input length against both:
+    // 1. User-configured --ctx-size
+    // 2. Hardware limit based on GPU's max buffer size
+    int user_max_tokens = model_->max_context_length;
+    int hardware_max_tokens = user_max_tokens;  // Default to user setting
+    
+    try {
+        // Query GPU device info for max buffer length
+        auto device_info = mlx::core::device_info(mlx::core::Device(mlx::core::Device::gpu, 0));
+        auto it = device_info.find("max_buffer_length");
+        if (it != device_info.end()) {
+            size_t max_buffer = std::get<size_t>(it->second);
+            // Use 50% of max buffer for attention, leave rest for KV cache and weights
+            size_t available_for_attention = max_buffer / 2;
+            // attention_memory = num_heads * seq_len^2 * 2 (FP16)
+            int num_heads = model_->num_attention_heads;
+            // max_seq = sqrt(available / (num_heads * 2))
+            hardware_max_tokens = static_cast<int>(std::sqrt(
+                static_cast<double>(available_for_attention) / (num_heads * 2)
+            ));
+        }
+    } catch (...) {
+        // Could not get device info, use user setting
+    }
+    
+    int effective_max_tokens = std::min(user_max_tokens, hardware_max_tokens);
+    
+    if (static_cast<int>(input_ids.size()) > effective_max_tokens) {
+        std::ostringstream error;
+        error << "Input too large: " << input_ids.size() << " tokens exceeds safe maximum of " 
+              << effective_max_tokens << " tokens. ";
+        if (hardware_max_tokens < user_max_tokens) {
+            error << "Your GPU's max buffer (" << (hardware_max_tokens) 
+                  << " token limit) is smaller than configured --ctx-size (" << user_max_tokens << "). ";
+        }
+        error << "Please reduce your input.";
+        throw std::runtime_error(error.str());
+    }
     
     // Setup generator params
     auto gen_params = MlxOgaGeneratorParams::Create(*model_);
