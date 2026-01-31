@@ -9,7 +9,15 @@
 
 namespace ryzenai {
 
-RyzenAIServer::RyzenAIServer(const CommandLineArgs& args) 
+/**
+ * @brief Constructs the Ryzen AI Server with the provided command line arguments.
+ *
+ * Initializes the server by loading models, setting up the HTTP server with thread pool,
+ * and configuring all API routes.
+ *
+ * @param args Command line arguments containing model paths, server settings, and backend configurations.
+ */
+RyzenAIServer::RyzenAIServer(const CommandLineArgs& args)
     : args_(args) {
     
     std::cout << "\n";
@@ -39,12 +47,31 @@ RyzenAIServer::RyzenAIServer(const CommandLineArgs& args)
     std::cout << "[Server] Initialization complete\n" << std::endl;
 }
 
+/**
+ * @brief Destructor for the Ryzen AI Server.
+ *
+ * Stops the server if it's running.
+ */
 RyzenAIServer::~RyzenAIServer() {
     stop();
 }
 
-GenerationParams RyzenAIServer::createGenerationParams(int max_tokens, float temperature, float top_p, 
-                                                       int top_k, float repeat_penalty, 
+/**
+ * @brief Creates generation parameters from user-provided values and defaults.
+ *
+ * This function combines user-specified generation parameters with default values
+ * from the inference engine configuration to create a complete GenerationParams object.
+ *
+ * @param max_tokens Maximum number of tokens to generate.
+ * @param temperature Sampling temperature (higher = more random).
+ * @param top_p Nucleus sampling parameter.
+ * @param top_k Top-k sampling parameter.
+ * @param repeat_penalty Penalty for repeating tokens.
+ * @param stop List of stop sequences.
+ * @return GenerationParams Configured parameters for text generation.
+ */
+GenerationParams RyzenAIServer::createGenerationParams(int max_tokens, float temperature, float top_p,
+                                                       int top_k, float repeat_penalty,
                                                        const std::vector<std::string>& stop) const {
     // Start with defaults from genai_config.json (or hardcoded defaults if no config)
     GenerationParams params = inference_engine_->getDefaultParams();
@@ -71,6 +98,14 @@ GenerationParams RyzenAIServer::createGenerationParams(int max_tokens, float tem
     return params;
 }
 
+/**
+ * @brief Loads all models specified in the command line arguments.
+ *
+ * Creates an inference engine with optimization settings and loads each model
+ * with its specified backend. Prints a summary of loaded models and their backends.
+ *
+ * @throws std::runtime_error If model loading fails.
+ */
 void RyzenAIServer::loadModel() {
     std::cout << "[Server] Loading models..." << std::endl;
     std::cout << "[Server] Number of models to load: " << args_.models.size() << std::endl;
@@ -125,6 +160,15 @@ void RyzenAIServer::loadModel() {
     }
 }
 
+/**
+ * @brief Extracts the model name from a file path.
+ *
+ * This function takes a full path to a model file and returns just the filename
+ * (the part after the last directory separator).
+ *
+ * @param model_path The full path to the model file.
+ * @return std::string The extracted model name (filename).
+ */
 std::string RyzenAIServer::extractModelName(const std::string& model_path) {
     // Extract the last component of the path
     size_t last_slash = model_path.find_last_of("/\\");
@@ -134,6 +178,12 @@ std::string RyzenAIServer::extractModelName(const std::string& model_path) {
     return model_path;
 }
 
+/**
+ * @brief Sets up HTTP routes for the server API endpoints.
+ *
+ * This function configures all the REST API routes including CORS headers,
+ * health check, completions, chat completions, responses, and models endpoints.
+ */
 void RyzenAIServer::setupRoutes() {
     std::cout << "[Server] Setting up routes..." << std::endl;
     
@@ -193,6 +243,15 @@ void RyzenAIServer::setupRoutes() {
     std::cout << "[Server] [OK] Routes configured" << std::endl;
 }
 
+/**
+ * @brief Creates a standardized error response JSON object.
+ *
+ * This function generates a consistent error response format for API errors.
+ *
+ * @param message The error message to include in the response.
+ * @param type The error type identifier.
+ * @return json JSON object containing the error information.
+ */
 json RyzenAIServer::createErrorResponse(const std::string& message, const std::string& type) {
     return {
         {"error", {
@@ -202,6 +261,15 @@ json RyzenAIServer::createErrorResponse(const std::string& message, const std::s
     };
 }
 
+/**
+ * @brief Handles the health check endpoint request.
+ *
+ * This function returns server status information including loaded models,
+ * backend details, and configuration.
+ *
+ * @param req The HTTP request object.
+ * @param res The HTTP response object to be populated.
+ */
 void RyzenAIServer::handleHealth(const httplib::Request& req, httplib::Response& res) {
     json response = {
         {"status", "ok"},
@@ -220,6 +288,15 @@ void RyzenAIServer::handleHealth(const httplib::Request& req, httplib::Response&
     res.set_content(response.dump(2), "application/json");
 }
 
+/**
+ * @brief Handles the OpenAI completions endpoint request.
+ *
+ * This function processes text completion requests, supporting both streaming
+ * and non-streaming modes, with reasoning content parsing and error handling.
+ *
+ * @param req The HTTP request object containing the completion request.
+ * @param res The HTTP response object to be populated with the completion result.
+ */
 void RyzenAIServer::handleCompletions(const httplib::Request& req, httplib::Response& res) {
     try {
         json request_json = json::parse(req.body);
@@ -338,6 +415,15 @@ void RyzenAIServer::handleCompletions(const httplib::Request& req, httplib::Resp
     }
 }
 
+/**
+ * @brief Handles the OpenAI chat completions endpoint request.
+ *
+ * This function processes chat completion requests with message history,
+ * supporting both streaming and non-streaming modes, tool calls, and reasoning content parsing.
+ *
+ * @param req The HTTP request object containing the chat completion request.
+ * @param res The HTTP response object to be populated with the completion result.
+ */
 void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::Response& res) {
     try {
         // 1. Parse Request
@@ -512,6 +598,14 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
     }
 }
 
+/**
+ * @brief Starts the HTTP server and begins listening for requests.
+ *
+ * This function starts the server on the configured host and port,
+ * displays server information, and blocks until the server is stopped.
+ *
+ * @throws std::runtime_error If the server fails to start listening.
+ */
 void RyzenAIServer::run() {
     running_ = true;
     
@@ -536,6 +630,15 @@ void RyzenAIServer::run() {
     }
 }
 
+/**
+ * @brief Handles the responses endpoint request.
+ *
+ * This function processes responses API requests, supporting both streaming
+ * and non-streaming modes, with event-based streaming format.
+ *
+ * @param req The HTTP request object containing the responses request.
+ * @param res The HTTP response object to be populated with the response result.
+ */
 void RyzenAIServer::handleResponses(const httplib::Request& req, httplib::Response& res) {
     try {
         // Parse request
@@ -757,6 +860,11 @@ void RyzenAIServer::handleResponses(const httplib::Request& req, httplib::Respon
     }
 }
 
+/**
+ * @brief Stops the HTTP server if it's running.
+ *
+ * This function stops the server and sets the running flag to false.
+ */
 void RyzenAIServer::stop() {
     if (running_) {
         std::cout << "\n[Server] Shutting down..." << std::endl;
@@ -765,6 +873,14 @@ void RyzenAIServer::stop() {
     }
 }
 
+/**
+ * @brief Handles the OpenAI models endpoint request.
+ *
+ * This function returns a list of all loaded models in OpenAI-compatible format,
+ * including model IDs, creation times, and backend information.
+ *
+ * @param res The HTTP response object to be populated with the models list.
+ */
 void RyzenAIServer::handleModels(httplib::Response& res) {
     // OpenAI-compatible /v1/models endpoint
     json models_array = json::array();

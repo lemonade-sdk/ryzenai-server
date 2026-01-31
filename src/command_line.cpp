@@ -4,6 +4,18 @@
 
 namespace ryzenai {
 
+/**
+ * @brief Parses command line arguments into a CommandLineArgs structure.
+ *
+ * This function processes the command line arguments passed to the program,
+ * validating and converting them into appropriate data types for server configuration.
+ * Supports both single model and multi-model configurations with different backends.
+ *
+ * @param argc Number of command line arguments.
+ * @param argv Array of command line argument strings.
+ * @return CommandLineArgs Structure containing parsed configuration values.
+ * @throws std::runtime_error If invalid arguments are provided or required values are missing.
+ */
 CommandLineArgs CommandLineParser::parse(int argc, char* argv[]) {
     CommandLineArgs args;
     
@@ -167,6 +179,15 @@ CommandLineArgs CommandLineParser::parse(int argc, char* argv[]) {
     return args;
 }
 
+/**
+ * @brief Prints the usage information and help text for the program.
+ *
+ * This function displays detailed command line usage instructions, including
+ * all available options, backend types, and examples of how to use the server
+ * with different configurations.
+ *
+ * @param program_name The name of the executable program.
+ */
 void CommandLineParser::printUsage(const char* program_name) {
     std::cout << "Ryzen AI LLM Server - OpenAI API compatible server for multi-backend execution\n\n";
     std::cout << "Usage: " << program_name << " -m MODEL_PATH [OPTIONS]\n\n";

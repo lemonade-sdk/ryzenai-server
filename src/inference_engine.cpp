@@ -33,8 +33,14 @@ using json = nlohmann::json;
 const std::vector<AdditionalToken> InferenceEngine::empty_tokens_;
 const GenerationParams InferenceEngine::default_params_;
 
-// ==================== Constructor/Destructor ====================
-
+/**
+ * @brief Constructs the InferenceEngine with specified optimization settings.
+ *
+ * Initializes the multi-backend inference engine, registers available backends
+ * based on compilation flags, and configures optimization parameters for model inference.
+ *
+ * @param opt Optimization settings including context size, KV cache, and repetition penalty parameters.
+ */
 InferenceEngine::InferenceEngine(const OptimizationSettings& opt)
     : opt_settings_(opt) {
     
@@ -49,7 +55,7 @@ InferenceEngine::InferenceEngine(const OptimizationSettings& opt)
 #ifdef MLX_ON
     BackendRegistry::instance().registerBackend(
         BackendType::MLX_METAL,
-        [this](const std::string& model_path) -> std::unique_ptr<IBackend> {
+        [](const std::string& model_path) -> std::unique_ptr<IBackend> {
             auto backend = std::make_unique<MlxBackend>(BackendType::MLX_METAL);
             backend->loadModel(model_path);
             return backend;
@@ -79,6 +85,11 @@ InferenceEngine::InferenceEngine(const OptimizationSettings& opt)
 #endif
 }
 
+/**
+ * @brief Destructor for the InferenceEngine.
+ *
+ * Cleans up all loaded models and clears the model index.
+ */
 InferenceEngine::~InferenceEngine() {
     std::lock_guard<std::mutex> lock(models_mutex_);
     std::cout << "[InferenceEngine] Shutting down, unloading " << loaded_models_.size() << " models" << std::endl;
@@ -86,8 +97,14 @@ InferenceEngine::~InferenceEngine() {
     model_index_.clear();
 }
 
-// ==================== Helper Functions ====================
-
+/**
+ * @brief Normalizes a model name by converting to lowercase and keeping only alphanumeric characters.
+ *
+ * This function creates a standardized version of the model name for indexing and lookup.
+ *
+ * @param name The original model name.
+ * @return std::string The normalized model name.
+ */
 std::string InferenceEngine::normalizeModelName(const std::string& name) {
     std::string result;
     result.reserve(name.size());

@@ -26,16 +26,27 @@ void signalHandler(int signum) {
     std::exit(signum);
 }
 
+/**
+ * @brief Main entry point of the Ryzen AI LLM Server application.
+ *
+ * This function initializes the server by parsing command line arguments,
+ * validating required inputs, checking NPU driver compatibility,
+ * and starting the server to handle inference requests.
+ *
+ * @param argc Number of command line arguments.
+ * @param argv Array of command line argument strings.
+ * @return int Exit code (0 for success, 1 for error).
+ */
 int main(int argc, char* argv[]) {
     // Ensure console output works
     std::cout << "Ryzen AI LLM Server starting..." << std::endl;
     std::cout.flush();
-    
+
     try {
         // Register signal handler for graceful shutdown
         std::signal(SIGINT, signalHandler);
         std::signal(SIGTERM, signalHandler);
-        
+
         // Parse command line arguments
         ryzenai::CommandLineArgs args;
         try {
@@ -45,26 +56,26 @@ int main(int argc, char* argv[]) {
             ryzenai::CommandLineParser::printUsage(argv[0]);
             return 1;
         }
-        
+
         // Validate required arguments
         if (args.model_path.empty()) {
             std::cerr << "Error: Model path is required (-m flag)\n\n";
             ryzenai::CommandLineParser::printUsage(argv[0]);
             return 1;
         }
-        
+
         // Check NPU driver version (Windows only)
         // This will print an error and open browser if driver is too old
         if (!ryzenai::CheckNPUDriverVersion()) {
             std::cerr << "Aborting startup due to unsupported NPU driver version." << std::endl;
             return 1;
         }
-        
+
         // Create and run the server
         g_server = std::make_unique<ryzenai::RyzenAIServer>(args);        g_server->run();
-        
+
         return 0;
-        
+
     } catch (const std::exception& e) {
         std::cerr << "\n===============================================================\n";
         std::cerr << "FATAL ERROR: " << e.what() << std::endl;

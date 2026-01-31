@@ -95,6 +95,13 @@ private:
     IWbemServices* pSvc_ = nullptr;
 };
 
+/**
+ * @brief Retrieves the NPU driver version string from the Windows system.
+ *
+ * This function uses WMI to query the driver version of the NPU Compute Accelerator Device.
+ *
+ * @return std::string The driver version string, or empty string if not found or WMI fails.
+ */
 std::string GetNPUDriverVersion() {
     WMIConnection wmi;
     if (!wmi.is_valid()) return "";
@@ -110,6 +117,13 @@ std::string GetNPUDriverVersion() {
     return "";
 }
 
+/**
+ * @brief Opens the default web browser to the specified URL.
+ *
+ * This function uses ShellExecute to launch the default browser with the given URL.
+ *
+ * @param url The URL to open in the browser.
+ */
 void OpenBrowser(const std::string& url) {
     ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
 }
@@ -128,7 +142,16 @@ void OpenBrowser(const std::string& url) {
 
 #endif
 
-// Returns true if v1 < v2
+/**
+ * @brief Compares two version strings to determine if the first is less than the second.
+ *
+ * This function parses version strings in dotted notation (e.g., "1.2.3.4") and compares
+ * them component by component to determine ordering.
+ *
+ * @param v1 First version string to compare.
+ * @param v2 Second version string to compare.
+ * @return bool True if v1 is less than v2, false otherwise.
+ */
 bool IsVersionLessThan(const std::string& v1, const std::string& v2) {
     auto parse_version = [](const std::string& v) -> std::vector<int> {
         std::vector<int> parts;
@@ -159,6 +182,15 @@ bool IsVersionLessThan(const std::string& v1, const std::string& v2) {
     return false;
 }
 
+/**
+ * @brief Checks if the installed NPU driver version meets the minimum requirements.
+ *
+ * This function retrieves the current NPU driver version and compares it against
+ * the minimum required version for Ryzen AI server. If the version is too old,
+ * it displays an error message and opens a browser to the driver download page.
+ *
+ * @return bool True if the driver version is sufficient or undetectable, false if too old.
+ */
 bool CheckNPUDriverVersion() {
     std::string version = GetNPUDriverVersion();
     std::cout << "[DEBUG] GetNPUDriverVersion returned: '" << version << "'" << std::endl;
