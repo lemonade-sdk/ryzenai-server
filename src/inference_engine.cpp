@@ -485,19 +485,19 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
         std::cout << "[InferenceEngine] Generating..." << std::endl;
 
         // OPTIMIZATION: Pre-compute stop token IDs (avoid string decode every token)
+        // NOTE: Only stop on CHAT_END tokens, NOT THINKING_END!
+        // The model should complete thinking then continue with the answer.
         std::vector<int32_t> stop_token_ids;
 #ifdef MLX_ON
-        // Get CHAT_END and other stop token IDs
+        // Get CHAT_END token IDs only (not THINKING_END)
         for (const auto& tag : model_->additional_tags) {
-            if ((tag.type == SpecialTokenType::CHAT_END || 
-                 tag.type == SpecialTokenType::THINKING_END) && tag.token_id >= 0) {
+            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
                 stop_token_ids.push_back(tag.token_id);
             }
         }
 #else
         for (const auto& tag : fallback_additional_tags_) {
-            if ((tag.type == SpecialTokenType::CHAT_END ||
-                 tag.type == SpecialTokenType::THINKING_END) && tag.token_id >= 0) {
+            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
                 stop_token_ids.push_back(tag.token_id);
             }
         }

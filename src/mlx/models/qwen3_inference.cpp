@@ -126,9 +126,6 @@ void Qwen3Inference::clear_cache() {
     // This avoids memory allocation overhead between conversations
     step_ = 0;
     cache_position_ = 0;
-    
-    // Note: We don't clear k_cache_/v_cache_ - they remain pre-allocated
-    // The cache_position_ determines the valid portion of the cache
 }
 
 
@@ -269,8 +266,6 @@ array Qwen3Inference::forward(const std::vector<int32_t>& input_tokens,
     array logits = (tie_word_embeddings_ && embed_tokens_transposed_.has_value()) ? 
         reshape(matmul(last_h, *embed_tokens_transposed_), {model_.vocab_size}) :
         reshape(linear_fast(last_h, weights_.lm_head), {model_.vocab_size});
-    
-    eval(logits);
     return logits;
 }
 
@@ -540,14 +535,13 @@ array Qwen3Inference::linear_fast(const array& x, const ryzenai::mlx::LinearWeig
 }
 
 /*
- * rms_norm_fast - Optimized RMS norm using direct weight reference
+ * rms_norm_fast - Optimized RMS norm using MLX fast::rms_norm
+ * OPTIMIZED: Uses fused kernel instead of manual calculation
  */
 array Qwen3Inference::rms_norm_fast(const array& x, const array* weight) {
     if (!weight) return x;
-    
-    array variance = mean(square(x), -1, true);
-    array inv_std = rsqrt(variance + model_.rms_norm_eps);
-    return x * inv_std * (*weight);
+    // OPTIMIZED: Use MLX fast::rms_norm - fused kernel, no intermediates
+    return fast::rms_norm(x, *weight, model_.rms_norm_eps);
 }
 
 
