@@ -18,7 +18,7 @@
 using namespace mlx::core;
 
 
-MixtralInference::MixtralInference(const OgaModel& model) : model_(model) {
+MixtralInference::MixtralInference(const MlxOgaModel& model) : model_(model) {
     actual_hidden_size_ = model_.hidden_size;
 
     // 1. Priority: Explicit config value
@@ -105,7 +105,7 @@ array MixtralInference::rms_norm(const array& x, const std::string& weight_name)
 
 
 array MixtralInference::forward(const std::vector<int32_t>& input_tokens,
-                                const OgaGeneratorParams& params) {
+                                const MlxOgaGeneratorParams& params) {
     int seq_len = static_cast<int>(input_tokens.size());
 
     auto embed_it = cached_weights_.find("embed_tokens.weight");
@@ -224,7 +224,7 @@ array MixtralInference::moe_block(const array& x, const std::string& prefix) {
 }
 
 
-int MixtralInference::sample_token(const array& logits, const OgaGeneratorParams& params) {
+int MixtralInference::sample_token(const array& logits, const MlxOgaGeneratorParams& params) {
     array l = params.do_sample && params.temperature > 0.0f 
         ? logits / params.temperature : logits;
     return static_cast<int>(argmax(l).item<int32_t>());

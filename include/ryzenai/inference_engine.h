@@ -1,18 +1,19 @@
+/*
+ * inference_engine.h
+ * 
+ * Multi-backend inference engine that supports loading multiple models
+ * across different backends (MLX, ONNX/Ryzen AI) simultaneously.
+ */
+
 #pragma once
 
-#include "types.h"
-#include "mlx/model.h"
+#include <ryzenai/types.h>
+#include <ryzenai/backend/backend.h>
 #include <string>
 #include <vector>
 #include <memory>
 #include <mutex>
-
-// Forward declarations for ONNX Runtime GenAI
-struct OgaModel;
-struct OgaTokenizer;
-struct OgaGeneratorParams;
-struct OgaGenerator;
-struct OgaSequences;
+#include <unordered_map>
 
 namespace ryzenai {
 
@@ -23,7 +24,7 @@ struct CompletionTimingData {
     double tps = 0.0;              // Tokens per second (decode speed)
     double total_time_ms = 0.0;    // Total completion time in milliseconds
     
-    // Detailed profiling (only filled when PROFILE_INFERENCE is defined)
+    // Detailed profiling
     double tokenize_ms = 0.0;      // Input tokenization time
     double prefill_ms = 0.0;       // First token / prefill time
     double decode_ms = 0.0;        // Total decode time (excluding prefill)
@@ -38,69 +39,127 @@ struct OptimizationSettings {
     int prefill_chunk = 512;          // --prefill-chunk
 };
 
+// Information about a loaded model
+struct LoadedModel {
+    std::unique_ptr<IBackend> backend;
+    std::string model_name;       // Short name: "phi3", "qwen3"
+    std::string model_path;       // Full path to model
+    BackendType backend_type;
+    
+    LoadedModel() = default;
+    LoadedModel(LoadedModel&&) = default;
+    LoadedModel& operator=(LoadedModel&&) = default;
+};
+
+/*
+ * InferenceEngine
+ * 
+ * Manages multiple loaded models across different backends.
+ * Routes API requests to the appropriate backend based on model name.
+ */
 class InferenceEngine {
 public:
-    InferenceEngine(const std::string& model_path, const std::string& mode, 
-                   const OptimizationSettings& opt = OptimizationSettings());
+    explicit InferenceEngine(const OptimizationSettings& opt = OptimizationSettings());
     ~InferenceEngine();
     
-    // Synchronous completion
-    // Returns generated text. If out_timing is provided, stores timing data.
-    std::string complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing = nullptr);
+    // ==================== Model Management ====================
     
-    // Streaming completion
+    // Load a model on the specified backend
+    // Returns the assigned model name (extracted from path or config)
+    std::string loadModel(const std::string& model_path, BackendType backend_type);
+    
+    // Unload a model by name
+    void unloadModel(const std::string& model_name);
+    
+    // Get list of loaded model names
+    std::vector<std::string> getLoadedModels() const;
+    
+    // Get backend for a specific model (for direct access)
+    IBackend* getBackendForModel(const std::string& model_name);
+    const IBackend* getBackendForModel(const std::string& model_name) const;
+    
+    // Get the first/default loaded model (backward compatibility)
+    IBackend* getDefaultBackend();
+    
+    // ==================== Inference (Model-Specific) ====================
+    
+    // Synchronous completion for a specific model
+    std::string complete(const std::string& model_name, 
+                        const std::string& prompt, 
+                        const GenerationParams& params, 
+                        CompletionTimingData* out_timing = nullptr);
+    
+    // Streaming completion for a specific model
+    void streamComplete(const std::string& model_name,
+                       const std::string& prompt, 
+                       const GenerationParams& params,
+                       StreamCallback callback);
+    
+    // Apply chat template for a specific model (requires 3 args to avoid ambiguity)
+    std::string applyChatTemplate(const std::string& model_name,
+                                  const std::string& messages_json, 
+                                  const std::string& tools_json);
+    
+    // Token counting for a specific model
+    int countTokens(const std::string& model_name, const std::string& text);
+    
+    // ==================== Model Info ====================
+    
+    // Get model info by name
+    std::string getModelType(const std::string& model_name) const;
+    int getMaxContextLength(const std::string& model_name) const;
+    GenerationParams getDefaultParams(const std::string& model_name) const;
+    const std::vector<AdditionalToken>& getSpecialTokens(const std::string& model_name) const;
+    
+    // ==================== Backward Compatibility ====================
+    // These use the first loaded model (for single-model usage)
+    
+    std::string complete(const std::string& prompt, 
+                        const GenerationParams& params, 
+                        CompletionTimingData* out_timing = nullptr);
+    
     void streamComplete(const std::string& prompt, 
                        const GenerationParams& params,
                        StreamCallback callback);
     
-    // Apply chat template to messages
-    std::string applyChatTemplate(const std::string& messages_json, const std::string& tools_json = "");
+    std::string applyChatTemplate(const std::string& messages_json, 
+                                  const std::string& tools_json = "");
     
-    // Getters
-    std::string getModelName() const { return model_name_; }
-    std::string getExecutionMode() const { return execution_mode_; }
-    int getMaxPromptLength() const { return max_prompt_length_; }
-    std::string getRyzenAIVersion() const { return ryzenai_version_; }
-    
-    // Get default generation params from genai_config.json (if available)
-    GenerationParams getDefaultParams() const;
-    
-    // Token counting
     int countTokens(const std::string& text);
-
-    // Get additional special tokens for streaming detection
+    
+    // Legacy getters
+    std::string getModelName() const;
+    std::string getExecutionMode() const { return execution_mode_; }
+    GenerationParams getDefaultParams() const;
     const std::vector<AdditionalToken>& getAdditionalTags() const;
     
 private:
-    void loadModel();
-    void setupExecutionProvider();
-    void loadRaiConfig();
-    std::string detectRyzenAIVersion();
-    std::string resolveModelPath(const std::string& path);
-    std::vector<int32_t> truncatePrompt(const std::vector<int32_t>& input_ids);
-    bool validateModelDirectory(const std::string& path);
+    // Normalize model name for lookup (lowercase, remove special chars)
+    static std::string normalizeModelName(const std::string& name);
     
-    std::unique_ptr<OgaModel> model_;
-    std::unique_ptr<OgaTokenizer> tokenizer_;
+    // Extract model name from path or config
+    std::string extractModelName(const std::string& model_path);
     
-    std::string model_path_;
-    std::string model_name_;
-    std::string execution_mode_;  // "npu", "hybrid", or "cpu"
-    std::string ryzenai_version_;
-    std::string chat_template_;  // Chat template from tokenizer_config.json
-    int max_prompt_length_ = 2048;  // Default, overridden by rai_config.json
-    int ctx_size_ = 2048;  // Context size for KV cache (from --ctx-size)
+    // Find loaded model by name (case-insensitive)
+    LoadedModel* findModel(const std::string& model_name);
+    const LoadedModel* findModel(const std::string& model_name) const;
     
-    // Default generation params from genai_config.json search section
-    GenerationParams default_params_;
-    bool has_search_config_ = false;
+    // All loaded models
+    std::vector<LoadedModel> loaded_models_;
     
-    // Fallback additional tokens for non-MLX backends (Onyx)
-    // For MLX, we use model_->additional_tags directly
-    std::vector<AdditionalToken> fallback_additional_tags_;
+    // Quick lookup by normalized name
+    std::unordered_map<std::string, size_t> model_index_;
     
-    std::mutex inference_mutex_;  // Protect inference operations
+    // Settings
+    OptimizationSettings opt_settings_;
+    std::string execution_mode_ = "auto";  // For compatibility
+    
+    // Thread safety
+    mutable std::mutex models_mutex_;
+    
+    // Empty fallbacks for const references
+    static const std::vector<AdditionalToken> empty_tokens_;
+    static const GenerationParams default_params_;
 };
 
 } // namespace ryzenai
-

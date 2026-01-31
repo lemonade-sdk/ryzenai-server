@@ -8,13 +8,21 @@
 // Global server pointer for signal handling
 std::unique_ptr<ryzenai::RyzenAIServer> g_server;
 
+/**
+ * @brief Signal handler for graceful shutdown on interrupt signals.
+ *
+ * This function is called when SIGINT (Ctrl+C) or SIGTERM signals are received.
+ * It stops the server if it's running and exits the program with the signal number.
+ *
+ * @param signum The signal number (e.g., 2 for SIGINT, 15 for SIGTERM).
+ */
 void signalHandler(int signum) {
     std::cout << "\n\n[Main] Interrupt signal (" << signum << ") received." << std::endl;
-    
+
     if (g_server) {
         g_server->stop();
     }
-    
+
     std::exit(signum);
 }
 

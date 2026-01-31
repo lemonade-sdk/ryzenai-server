@@ -28,17 +28,17 @@ namespace fs = std::filesystem;
  *
  * Forward declaration for loading additional special tokens.
  */
-void loadAdditionalTokens(OgaModel* model);
+void loadAdditionalTokens(MlxOgaModel* model);
 
 /*
- * OgaModel::Create
+ * MlxOgaModel::Create
  * 
  * Loads a model from the specified directory.
  * Reads config.json for model parameters and loads weights from safetensors.
  * Automatically detects quantization settings.
  */
-std::unique_ptr<OgaModel> OgaModel::Create(const char* model_path) {
-    auto model = std::make_unique<OgaModel>();
+std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
+    auto model = std::make_unique<MlxOgaModel>();
     model->model_path = model_path;
 
     model->quantization = detect_quantization_config(model_path);
@@ -129,7 +129,7 @@ std::unique_ptr<OgaModel> OgaModel::Create(const char* model_path) {
         }
     }
 
-    std::cout << "[OgaModel] Auto-configured EOS Token IDs: ";
+    std::cout << "[MlxOgaModel] Auto-configured EOS Token IDs: ";
     for (size_t i = 0; i < model->eos_token_ids.size(); ++i) {
         if (i > 0) std::cout << ", ";
         std::cout << model->eos_token_ids[i];
@@ -295,7 +295,7 @@ std::unique_ptr<OgaModel> OgaModel::Create(const char* model_path) {
  * Loads additional special tokens from model JSON files for streaming detection.
  * Reads added_tokens.json and tokenizer_config.json to extract thinking, tool, and chat tags.
  */
-void loadAdditionalTokens(OgaModel* model) {
+void loadAdditionalTokens(MlxOgaModel* model) {
     std::string model_path = model->model_path;
 
     // 1. Load from added_tokens.json
@@ -441,12 +441,12 @@ void loadAdditionalTokens(OgaModel* model) {
 }
 
 /*
- * OgaModel::GetStopSequences
+ * MlxOgaModel::GetStopSequences
  *
  * Returns model-specific stop sequences that should halt generation.
  * These are checked as strings in addition to EOS token ID checks.
  */
-std::vector<std::string> OgaModel::GetStopSequences() const {
+std::vector<std::string> MlxOgaModel::GetStopSequences() const {
     std::vector<std::string> stop_sequences;
 
     std::string lower_path = model_path;
@@ -474,12 +474,12 @@ std::vector<std::string> OgaModel::GetStopSequences() const {
 }
 
 
-std::unique_ptr<OgaGeneratorParams> OgaGeneratorParams::Create(const OgaModel&) {
-    return std::make_unique<OgaGeneratorParams>();
+std::unique_ptr<MlxOgaGeneratorParams> MlxOgaGeneratorParams::Create(const MlxOgaModel&) {
+    return std::make_unique<MlxOgaGeneratorParams>();
 }
 
 
-void OgaGeneratorParams::SetSearchOption(const std::string& key, int value) {
+void MlxOgaGeneratorParams::SetSearchOption(const std::string& key, int value) {
     if (key == "max_length") max_length = value;
     else if (key == "top_k") top_k = value;
     else if (key == "eos_token_id") eos_token_id = value;
@@ -487,7 +487,7 @@ void OgaGeneratorParams::SetSearchOption(const std::string& key, int value) {
 }
 
 
-void OgaGeneratorParams::SetSearchOption(const std::string& key, double value) {
+void MlxOgaGeneratorParams::SetSearchOption(const std::string& key, double value) {
     if (key == "temperature") temperature = static_cast<float>(value);
     else if (key == "top_p") top_p = static_cast<float>(value);
     else if (key == "repetition_penalty") repetition_penalty = static_cast<float>(value);
@@ -495,19 +495,19 @@ void OgaGeneratorParams::SetSearchOption(const std::string& key, double value) {
 }
 
 
-void OgaGeneratorParams::SetSearchOptionBool(const std::string& key, bool value) {
+void MlxOgaGeneratorParams::SetSearchOptionBool(const std::string& key, bool value) {
     if (key == "do_sample") do_sample = value;
 }
 
 
 /*
- * OgaGenerator::Create
+ * MlxOgaGenerator::Create
  * 
  * Creates a generator instance bound to a model.
  * Initializes the appropriate inference engine based on model architecture.
  */
-std::unique_ptr<OgaGenerator> OgaGenerator::Create(const OgaModel& model, const OgaGeneratorParams& p) {
-    auto gen = std::make_unique<OgaGenerator>();
+std::unique_ptr<MlxOgaGenerator> MlxOgaGenerator::Create(const MlxOgaModel& model, const MlxOgaGeneratorParams& p) {
+    auto gen = std::make_unique<MlxOgaGenerator>();
     gen->model = &model;
     gen->params = p;
     gen->current_tokens.clear();
@@ -523,19 +523,19 @@ std::unique_ptr<OgaGenerator> OgaGenerator::Create(const OgaModel& model, const 
 }
 
 
-void OgaGenerator::SetTokenizer(const OgaTokenizer& tokenizer) {
+void MlxOgaGenerator::SetTokenizer(const MlxOgaTokenizer& tokenizer) {
     this->tokenizer = &tokenizer;
 }
 
 
-void OgaGenerator::AppendTokens(const int32_t* tokens, size_t count) {
+void MlxOgaGenerator::AppendTokens(const int32_t* tokens, size_t count) {
     current_tokens.insert(current_tokens.end(), tokens, tokens + count);
     input_token_count = current_tokens.size();  // Track input tokens
 }
 
 
 /*
- * OgaGenerator::GenerateNextToken
+ * MlxOgaGenerator::GenerateNextToken
  * 
  * Runs one step of autoregressive generation.
  * Computes logits via forward pass and samples next token.
@@ -543,7 +543,7 @@ void OgaGenerator::AppendTokens(const int32_t* tokens, size_t count) {
  * OPTIMIZATION: Only passes last token during decode phase (after prefill).
  * This enables O(n) complexity with KV cache instead of O(n²) reprocessing.
  */
-void OgaGenerator::GenerateNextToken() {
+void MlxOgaGenerator::GenerateNextToken() {
     if (done || !inference_engine) {
         int32_t next_token = 42;
         current_tokens.push_back(next_token);
@@ -613,7 +613,7 @@ void OgaGenerator::GenerateNextToken() {
         if (debug_count < 10000 && DEBUG_OUTPUT) {
             std::cout << "[Generator] Token " << debug_count << ": ID=" << next_token;
             if (this->tokenizer) {
-                OgaTokenizer* non_const_tok = const_cast<OgaTokenizer*>(this->tokenizer);
+                MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
                 const char* decoded_str = non_const_tok->Decode(&next_token, 1);
                 if (decoded_str) {
                     std::string s = decoded_str;
@@ -630,7 +630,7 @@ void OgaGenerator::GenerateNextToken() {
 
         // --- ROBUST STRING STOP CHECK ---
         if (this->tokenizer && current_tokens.size() > input_token_count) {
-            OgaTokenizer* non_const_tok = const_cast<OgaTokenizer*>(this->tokenizer);
+            MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
             const char* decoded_str = non_const_tok->Decode(&next_token, 1);
             
             if (decoded_str && decoded_str[0] != '\0') {
@@ -665,28 +665,28 @@ void OgaGenerator::GenerateNextToken() {
 }
 
 
-bool OgaGenerator::IsDone() const {
+bool MlxOgaGenerator::IsDone() const {
     return done;
 }
 
 
-const int32_t* OgaGenerator::GetSequenceData(int) const {
+const int32_t* MlxOgaGenerator::GetSequenceData(int) const {
     return current_tokens.data();
 }
 
 
-size_t OgaGenerator::GetSequenceCount(int) const {
+size_t MlxOgaGenerator::GetSequenceCount(int) const {
     return current_tokens.size();
 }
 
 
 /*
- * OgaGenerator::sample_token
+ * MlxOgaGenerator::sample_token
  * 
  * Token sampling with temperature scaling.
  * Uses greedy decoding (argmax).
  */
-int OgaGenerator::sample_token(const array& logits) {
+int MlxOgaGenerator::sample_token(const array& logits) {
     if (params.do_sample) {
         if (params.temperature > 0.0f) {
             array scaled_logits = logits / params.temperature;

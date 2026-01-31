@@ -7,9 +7,9 @@
 // Opaque types for C-interface compatibility if needed
 using oga_char_ptr = const char*;
 
-struct OgaSequences {
+struct MlxOgaSequences {
     std::vector<int32_t> ids;
-    static std::unique_ptr<OgaSequences> Create();
+    static std::unique_ptr<MlxOgaSequences> Create();
     const int32_t* SequenceData(int index) const;
     size_t SequenceCount(int index) const;
 };
@@ -22,11 +22,11 @@ public:
     virtual std::string Decode(const std::vector<int32_t>& ids) = 0;
 };
 
-struct OgaTokenizer {
+struct MlxOgaTokenizer {
 public:
-    static std::unique_ptr<OgaTokenizer> Create(const OgaModel& model);
+    static std::unique_ptr<MlxOgaTokenizer> Create(const MlxOgaModel& model);
     
-    void Encode(const char* text, OgaSequences& sequences);
+    void Encode(const char* text, MlxOgaSequences& sequences);
     oga_char_ptr Decode(const int32_t* tokens, size_t count);
     
     oga_char_ptr ApplyChatTemplate(const char* template_str, 
@@ -40,13 +40,13 @@ private:
     std::string decoded_buffer; // Thread-local storage emulation
 };
 
-class OgaTokenizerStream {
+class MlxOgaTokenizerStream {
 public:
-    static std::unique_ptr<OgaTokenizerStream> Create(const OgaTokenizer& tokenizer);
+    static std::unique_ptr<MlxOgaTokenizerStream> Create(const MlxOgaTokenizer& tokenizer);
     oga_char_ptr Decode(int32_t token);
 
 private:
-    const OgaTokenizer* tokenizer;
+    const MlxOgaTokenizer* tokenizer;
     std::vector<int32_t> pending_tokens;
     std::string accumulated;
     std::string decoded_buffer;

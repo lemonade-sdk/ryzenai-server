@@ -64,6 +64,11 @@ CompletionRequest CompletionRequest::fromJSON(const json& j) {
 ChatCompletionRequest ChatCompletionRequest::fromJSON(const json& j) {
     ChatCompletionRequest req;
     
+    // Parse model name (required for multi-model routing)
+    if (j.contains("model") && j["model"].is_string()) {
+        req.model = j["model"];
+    }
+    
     if (j.contains("messages") && j["messages"].is_array()) {
         for (const auto& msg : j["messages"]) {
             ChatMessage message;

@@ -36,7 +36,7 @@ public:
      * Initializes the inference engine with model weights and configuration.
      * Caches weights for efficient repeated forward passes.
      */
-    Qwen3Inference(const OgaModel& model);
+    Qwen3Inference(const MlxOgaModel& model);
 
     /*
      * forward
@@ -48,14 +48,14 @@ public:
      * If input_tokens.size() == 1: Decode mode - appends to cache, generates
      */
     array forward(const std::vector<int32_t>& input_tokens,
-                  const OgaGeneratorParams& params) override;
+                  const MlxOgaGeneratorParams& params) override;
 
     /*
      * sample_token
      * Selects the next token from output logits.
      * Supports temperature scaling for sampling.
      */
-    int sample_token(const array& logits, const OgaGeneratorParams& params) override;
+    int sample_token(const array& logits, const MlxOgaGeneratorParams& params) override;
 
     /*
      * clear_cache
@@ -70,7 +70,7 @@ public:
     bool supports_kv_cache() const override { return true; }
 
 private:
-    const OgaModel& model_;
+    const MlxOgaModel& model_;
     int actual_hidden_size_;
     int head_dim_;
     bool tie_word_embeddings_;

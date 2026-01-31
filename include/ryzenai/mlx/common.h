@@ -14,9 +14,11 @@
 
 using namespace mlx::core;
 
-struct OgaModel;
-struct OgaGeneratorParams;
-struct OgaTokenizer;
+// Forward declarations for MLX OGA-compatible types
+// Named MlxOga* to distinguish from ONNX OGA types
+struct MlxOgaModel;
+struct MlxOgaGeneratorParams;
+struct MlxOgaTokenizer;
 
 
 /*
@@ -36,14 +38,14 @@ public:
      * Returns logits for vocabulary prediction.
      */
     virtual array forward(const std::vector<int32_t>& input_tokens,
-                          const OgaGeneratorParams& params) = 0;
+                          const MlxOgaGeneratorParams& params) = 0;
 
     /*
      * sample_token
      * Samples the next token from output logits.
      * Implements sampling strategy (greedy, temperature, etc.).
      */
-    virtual int sample_token(const array& logits, const OgaGeneratorParams& params) = 0;
+    virtual int sample_token(const array& logits, const MlxOgaGeneratorParams& params) = 0;
     
     /*
      * supports_kv_cache
@@ -62,4 +64,4 @@ public:
  * Factory function that creates the appropriate inference engine
  * based on the model's architecture type.
  */
-std::unique_ptr<BaseInferenceEngine> create_inference_engine(const OgaModel& model);
+std::unique_ptr<BaseInferenceEngine> create_inference_engine(const MlxOgaModel& model);

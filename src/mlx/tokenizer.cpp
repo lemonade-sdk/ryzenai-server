@@ -253,12 +253,12 @@ public:
 // OGA TOKENIZER
 // =========================================================
 
-std::unique_ptr<OgaSequences> OgaSequences::Create() { return std::make_unique<OgaSequences>(); }
-const int32_t* OgaSequences::SequenceData(int) const { return ids.data(); }
-size_t OgaSequences::SequenceCount(int) const { return ids.size(); }
+std::unique_ptr<MlxOgaSequences> MlxOgaSequences::Create() { return std::make_unique<MlxOgaSequences>(); }
+const int32_t* MlxOgaSequences::SequenceData(int) const { return ids.data(); }
+size_t MlxOgaSequences::SequenceCount(int) const { return ids.size(); }
 
-std::unique_ptr<OgaTokenizer> OgaTokenizer::Create(const OgaModel& model) {
-    auto tok = std::make_unique<OgaTokenizer>();
+std::unique_ptr<MlxOgaTokenizer> MlxOgaTokenizer::Create(const MlxOgaModel& model) {
+    auto tok = std::make_unique<MlxOgaTokenizer>();
 
     // 1. HuggingFace JSON
     std::string hf_path = model.model_path + "/tokenizer.json";
@@ -297,11 +297,11 @@ std::unique_ptr<OgaTokenizer> OgaTokenizer::Create(const OgaModel& model) {
     return tok;
 }
 
-void OgaTokenizer::Encode(const char* text, OgaSequences& sequences) {
+void MlxOgaTokenizer::Encode(const char* text, MlxOgaSequences& sequences) {
     if (backend) backend->Encode(text, sequences.ids);
 }
 
-oga_char_ptr OgaTokenizer::Decode(const int32_t* tokens, size_t count) {
+oga_char_ptr MlxOgaTokenizer::Decode(const int32_t* tokens, size_t count) {
     if (!backend) return "";
     std::vector<int32_t> ids(tokens, tokens + count);
     std::string raw = backend->Decode(ids);
@@ -310,7 +310,7 @@ oga_char_ptr OgaTokenizer::Decode(const int32_t* tokens, size_t count) {
     return tl_decoded_buffer.c_str();
 }
 
-oga_char_ptr OgaTokenizer::ApplyChatTemplate(const char* template_str, const char* messages_json, 
+oga_char_ptr MlxOgaTokenizer::ApplyChatTemplate(const char* template_str, const char* messages_json, 
                                               const char* tools_json, bool add_generation_prompt) {
     std::string active_template = (template_str && template_str[0]) ? template_str : chat_template_str;
     enum class TemplateType { ChatML, Llama2, Llama3, Phi3, Gemma, Mistral, Vicuna, Unknown };
@@ -353,14 +353,14 @@ oga_char_ptr OgaTokenizer::ApplyChatTemplate(const char* template_str, const cha
     return tl_decoded_buffer.c_str();
 }
 
-std::unique_ptr<OgaTokenizerStream> OgaTokenizerStream::Create(const OgaTokenizer& tokenizer) {
-    auto stream = std::make_unique<OgaTokenizerStream>();
+std::unique_ptr<MlxOgaTokenizerStream> MlxOgaTokenizerStream::Create(const MlxOgaTokenizer& tokenizer) {
+    auto stream = std::make_unique<MlxOgaTokenizerStream>();
     stream->tokenizer = &tokenizer;
     return stream;
 }
 
-oga_char_ptr OgaTokenizerStream::Decode(int32_t token) {
-    std::string delta = const_cast<OgaTokenizer*>(tokenizer)->Decode(&token, 1);
+oga_char_ptr MlxOgaTokenizerStream::Decode(int32_t token) {
+    std::string delta = const_cast<MlxOgaTokenizer*>(tokenizer)->Decode(&token, 1);
     accumulated += delta;
     decoded_buffer = delta;
     return decoded_buffer.c_str();

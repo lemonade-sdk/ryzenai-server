@@ -15,12 +15,12 @@
 
 
 /*
- * OgaGeneratorParams
+ * MlxOgaGeneratorParams
  * 
  * Configuration for text generation including sampling parameters.
  * Compatible with ONNX GenAI parameter interface.
  */
-struct OgaGeneratorParams {
+struct MlxOgaGeneratorParams {
     int max_length = 512;
     float temperature = 0.7f;
     float top_p = 0.95f;
@@ -31,7 +31,7 @@ struct OgaGeneratorParams {
     int eos_token_id = 2;  // Default EOS token ID
     int pad_token_id = 2;  // Default pad token ID
 
-    static std::unique_ptr<OgaGeneratorParams> Create(const OgaModel& model);
+    static std::unique_ptr<MlxOgaGeneratorParams> Create(const MlxOgaModel& model);
 
     void SetSearchOption(const std::string& key, int value);
     void SetSearchOption(const std::string& key, double value);
@@ -40,15 +40,15 @@ struct OgaGeneratorParams {
 
 
 /*
- * OgaGenerator
+ * MlxOgaGenerator
  * 
  * Manages autoregressive token generation.
  * Holds model reference, current token sequence, and inference engine.
  */
-struct OgaGenerator {
-    const OgaModel* model = nullptr;
-    const OgaTokenizer* tokenizer = nullptr;
-    OgaGeneratorParams params;
+struct MlxOgaGenerator {
+    const MlxOgaModel* model = nullptr;
+    const MlxOgaTokenizer* tokenizer = nullptr;
+    MlxOgaGeneratorParams params;
     std::vector<int32_t> current_tokens;
     bool done = false;
     std::unique_ptr<BaseInferenceEngine> inference_engine;
@@ -63,13 +63,13 @@ struct OgaGenerator {
      * Factory function that initializes generator with model and parameters.
      * Creates the appropriate inference engine based on model architecture.
      */
-    static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& p);
+    static std::unique_ptr<MlxOgaGenerator> Create(const MlxOgaModel& model, const MlxOgaGeneratorParams& p);
 
     /*
      * SetTokenizer
      * Associates a tokenizer for debug token decoding.
      */
-    void SetTokenizer(const OgaTokenizer& tokenizer);
+    void SetTokenizer(const MlxOgaTokenizer& tokenizer);
 
     /*
      * AppendTokens

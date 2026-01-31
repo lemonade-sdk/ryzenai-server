@@ -27,7 +27,7 @@
 using namespace mlx::core;
 
 
-Phi3Inference::Phi3Inference(const OgaModel& model, KVCacheMode kv_cache_mode) : 
+Phi3Inference::Phi3Inference(const MlxOgaModel& model, KVCacheMode kv_cache_mode) : 
     mask_val_(array(-std::numeric_limits<float>::infinity(), float32)),
     model_(model),
     kv_cache_mode_(kv_cache_mode)
@@ -141,7 +141,7 @@ array Phi3Inference::mlp_block_3d(const array& x, const std::string& prefix) {
     return linear(gate * sigmoid(gate) * up, prefix + "mlp.down_proj");
 }
 
-array Phi3Inference::forward(const std::vector<int32_t>& input_tokens, const OgaGeneratorParams& params) {
+array Phi3Inference::forward(const std::vector<int32_t>& input_tokens, const MlxOgaGeneratorParams& params) {
     (void)params;  // Suppress unused warning
     int seq_len = static_cast<int>(input_tokens.size());
     
@@ -319,7 +319,7 @@ array Phi3Inference::mlp_block(const array& x, const std::string& prefix) {
  * 
  * We must sample from the probability distribution.
  */
-int Phi3Inference::sample_token(const array& logits, const OgaGeneratorParams& params) {
+int Phi3Inference::sample_token(const array& logits, const MlxOgaGeneratorParams& params) {
     if (!params.do_sample || params.temperature <= 0.0f) {
         return static_cast<int>(argmax(logits).item<int32_t>());
     }

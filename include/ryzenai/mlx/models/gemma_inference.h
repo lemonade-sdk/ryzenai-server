@@ -20,7 +20,7 @@ public:
      * Initializes the Gemma inference engine with model configuration.
      * Extracts sliding window size from config if available.
      */
-    GemmaInference(const OgaModel& model);
+    GemmaInference(const MlxOgaModel& model);
 
     /*
      * forward
@@ -28,17 +28,17 @@ public:
      * Returns vocabulary logits for the final token position.
      */
     array forward(const std::vector<int32_t>& input_tokens,
-                  const OgaGeneratorParams& params) override;
+                  const MlxOgaGeneratorParams& params) override;
 
     /*
      * sample_token
      * Selects next token from output logits.
      * Supports temperature-based sampling.
      */
-    int sample_token(const array& logits, const OgaGeneratorParams& params) override;
+    int sample_token(const array& logits, const MlxOgaGeneratorParams& params) override;
 
 private:
-    const OgaModel& model_;
+    const MlxOgaModel& model_;
     int sliding_window_;
     int head_dim_;
     int actual_hidden_size_;

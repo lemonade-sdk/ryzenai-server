@@ -33,7 +33,7 @@ namespace fs = std::filesystem;
  * Determines model architecture from config.json and weight names.
  * Checks for model_type field, architecture hints, and weight patterns.
  */
-std::string detect_model_type(const OgaModel& model) {
+std::string detect_model_type(const MlxOgaModel& model) {
     std::string config_path = model.model_path + "/config.json";
     
     if (fs::exists(config_path)) {
@@ -133,7 +133,7 @@ std::string detect_model_type(const OgaModel& model) {
  * Factory function that creates the appropriate inference engine
  * based on detected model architecture.
  */
-std::unique_ptr<BaseInferenceEngine> create_inference_engine(const OgaModel& model) {
+std::unique_ptr<BaseInferenceEngine> create_inference_engine(const MlxOgaModel& model) {
     std::string model_type = detect_model_type(model);
     std::cout << "[InferenceFactory] Detected model type: " << model_type << std::endl;
 

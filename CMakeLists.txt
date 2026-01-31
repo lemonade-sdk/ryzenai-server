@@ -165,6 +165,19 @@ set(MLX_CORE_SOURCES
     src/mlx/tokenizer.cpp
 )
 
+# Backend abstraction sources (conditional compilation)
+set(BACKEND_SOURCES "")
+
+# MLX backend (macOS/Linux)
+if(BUILD_MLX)
+    list(APPEND BACKEND_SOURCES src/backend/mlx_backend.cpp)
+endif()
+
+# ONNX backend (Windows with Ryzen AI)
+if(BUILD_RYZEN)
+    list(APPEND BACKEND_SOURCES src/backend/onnx_backend.cpp)
+endif()
+
 # Core application sources
 set(CORE_SOURCES
     src/main.cpp
@@ -182,6 +195,7 @@ set(SOURCES
     ${CORE_SOURCES}
     ${MLX_CORE_SOURCES}
     ${MODEL_SOURCES}
+    ${BACKEND_SOURCES}
 )
 
 # SentencePiece is header-only for our use case

@@ -1,747 +1,408 @@
+/*
+ * inference_engine.cpp
+ * 
+ * Multi-backend inference engine implementation.
+ * Routes requests to appropriate backends based on model name.
+ */
+
 #include "ryzenai/inference_engine.h"
-#ifdef RYZENAI_ON
-#include <ort_genai.h>
-#include <ort_genai_c.h>
-#elif MLX_ON
-//MacOS Specific Enablement
-#include "ryzenai/mlx/mlx_oga.h"
+#include "ryzenai/backend/backend.h"
+
+#ifdef MLX_ON
+#include "ryzenai/backend/mlx_backend.h"
 #endif
+
+#ifdef RYZENAI_ON
+#include "ryzenai/backend/onnx_backend.h"
+#endif
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
-#include <cstdlib>
-#include <chrono>
+#include <algorithm>
+#include <cctype>
+#include <json.hpp>
 
 namespace ryzenai {
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
-InferenceEngine::InferenceEngine(const std::string& model_path, const std::string& mode, 
-                                   const OptimizationSettings& opt)
-    : execution_mode_(mode), ctx_size_(opt.ctx_size) {
+// Static member definitions
+const std::vector<AdditionalToken> InferenceEngine::empty_tokens_;
+const GenerationParams InferenceEngine::default_params_;
 
-    std::cout << "[InferenceEngine] Initializing with model: " << model_path << std::endl;
+// ==================== Constructor/Destructor ====================
+
+InferenceEngine::InferenceEngine(const OptimizationSettings& opt)
+    : opt_settings_(opt) {
+    
+    std::cout << "[InferenceEngine] Initializing multi-backend engine" << std::endl;
     std::cout << "[InferenceEngine] Optimization settings:" << std::endl;
     std::cout << "  - Context size: " << opt.ctx_size << " tokens" << std::endl;
     std::cout << "  - Repetition lookback: " << opt.repetition_lookback << " tokens" << std::endl;
     std::cout << "  - KV cache: " << (opt.kv_cache ? "enabled" : "disabled") << std::endl;
     std::cout << "  - Prefill chunk: " << opt.prefill_chunk << " tokens" << std::endl;
-    std::cout << "[InferenceEngine] Execution mode: " << mode << std::endl;
     
-    // Resolve model path (handles Hugging Face cache structure)
-    model_path_ = resolveModelPath(model_path);
-    if (model_path_ != model_path) {
-        std::cout << "[InferenceEngine] Resolved to: " << model_path_ << std::endl;
-    }
-    
-    // Validate model directory
-    if (!validateModelDirectory(model_path_)) {
-        throw std::runtime_error("Invalid model directory: " + model_path_);
-    }
-    
-    // Detect Ryzen AI version and load config
-    loadRaiConfig();
-    
-    // Setup execution provider
-    setupExecutionProvider();
-    
-    // Load the model
-    loadModel();
-    
-    // Extract model name from path
-    model_name_ = fs::path(model_path_).filename().string();
-    
-    // Load default generation params from genai_config.json
-    std::string config_path = model_path_ + "/genai_config.json";
-    if (fs::exists(config_path)) {
-        try {
-            std::ifstream file(config_path);
-            json config = json::parse(file);
-            
-            if (config.contains("search")) {
-                json search = config["search"];
-                has_search_config_ = true;
-                
-                // Load defaults from search config (matching Python implementation)
-                // NOTE: search.max_length from genai_config.json means TOTAL sequence length,
-                // but default_params_.max_length is used as "max NEW tokens" in our code.
-                // We intentionally DON'T load search.max_length here to avoid semantic confusion.
-                // The user's max_tokens parameter will be used directly as max new tokens.
-                
-                if (search.contains("temperature") && search["temperature"].is_number()) {
-                    default_params_.temperature = search["temperature"];
-                }
-                if (search.contains("top_p") && search["top_p"].is_number()) {
-                    default_params_.top_p = search["top_p"];
-                }
-                if (search.contains("top_k") && search["top_k"].is_number()) {
-                    default_params_.top_k = search["top_k"];
-                }
-                if (search.contains("repetition_penalty") && search["repetition_penalty"].is_number()) {
-                    default_params_.repetition_penalty = search["repetition_penalty"];
-                }
-                if (search.contains("do_sample") && search["do_sample"].is_boolean()) {
-                    default_params_.do_sample = search["do_sample"];
-                }
-                
-                std::cout << "[InferenceEngine] Loaded search config from genai_config.json" << std::endl;
-                std::cout << "  - temperature: " << default_params_.temperature << std::endl;
-                std::cout << "  - top_p: " << default_params_.top_p << std::endl;
-                std::cout << "  - top_k: " << default_params_.top_k << std::endl;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[WARNING] Failed to load search config from genai_config.json: " << e.what() << std::endl;
+    // Register available backends
+#ifdef MLX_ON
+    BackendRegistry::instance().registerBackend(
+        BackendType::MLX_METAL,
+        [this](const std::string& model_path) -> std::unique_ptr<IBackend> {
+            auto backend = std::make_unique<MlxBackend>(BackendType::MLX_METAL);
+            backend->loadModel(model_path);
+            return backend;
         }
-    }
-    
-    std::cout << "[InferenceEngine] Model loaded successfully: " << model_name_ << std::endl;
-    std::cout << "[InferenceEngine] Max prompt length: " << max_prompt_length_ << " tokens" << std::endl;
+    );
+    std::cout << "[InferenceEngine] Registered MLX Metal backend" << std::endl;
+#endif
+
+#ifdef RYZENAI_ON
+    BackendRegistry::instance().registerBackend(
+        BackendType::ONNX_RYZENAI,
+        [this](const std::string& model_path) -> std::unique_ptr<IBackend> {
+            auto backend = std::make_unique<OnnxBackend>(BackendType::ONNX_RYZENAI);
+            backend->loadModel(model_path);
+            return backend;
+        }
+    );
+    BackendRegistry::instance().registerBackend(
+        BackendType::ONNX_CPU,
+        [this](const std::string& model_path) -> std::unique_ptr<IBackend> {
+            auto backend = std::make_unique<OnnxBackend>(BackendType::ONNX_CPU);
+            backend->loadModel(model_path);
+            return backend;
+        }
+    );
+    std::cout << "[InferenceEngine] Registered ONNX backends" << std::endl;
+#endif
 }
 
 InferenceEngine::~InferenceEngine() {
-    std::cout << "[InferenceEngine] Shutting down" << std::endl;
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    std::cout << "[InferenceEngine] Shutting down, unloading " << loaded_models_.size() << " models" << std::endl;
+    loaded_models_.clear();
+    model_index_.clear();
 }
 
-const std::vector<AdditionalToken>& InferenceEngine::getAdditionalTags() const {
-#ifdef MLX_ON
-    // For MLX backend, use the model's additional_tags which were loaded from config files
-    return model_->additional_tags;
-#else
-    // For Onyx/RYZENAI backend, use the fallback tags
-    return fallback_additional_tags_;
-#endif
-}
+// ==================== Helper Functions ====================
 
-GenerationParams InferenceEngine::getDefaultParams() const {
-    return default_params_;
-}
-
-std::string InferenceEngine::applyChatTemplate(const std::string& messages_json, const std::string& tools_json) {
-    // Parse messages
-    json messages = json::parse(messages_json);
-    std::ostringstream prompt;
+std::string InferenceEngine::normalizeModelName(const std::string& name) {
+    std::string result;
+    result.reserve(name.size());
     
-    // Check if we have a Qwen-style chat template (contains <|im_start|>)
-    bool is_qwen_style = !chat_template_.empty() && 
-                         (chat_template_.find("<|im_start|>") != std::string::npos ||
-                          chat_template_.find("\\u003c|im_start|\\u003e") != std::string::npos);
-    
-    // If tools are provided, always use OGA's built-in template (it handles tools properly)
-    if (!tools_json.empty()) {
-        try {
-            const char* template_str = chat_template_.empty() ? nullptr : chat_template_.c_str();
-            const char* tools_str = tools_json.c_str();
-            
-            auto result = tokenizer_->ApplyChatTemplate(
-                template_str,
-                messages_json.c_str(),
-                tools_str,
-                true
-            );
-            
-            std::cout << "[InferenceEngine] Applied chat template with tools" << std::endl;
-            return std::string(result);
-            
-        } catch (const std::exception& e) {
-            std::cerr << "[ERROR] Failed to apply chat template with tools: " << e.what() << std::endl;
-            throw;
-        }
-    } else if (is_qwen_style) {
-        // Use Qwen/ChatML format: <|im_start|>role\ncontent<|im_end|>\n
-        for (const auto& msg : messages) {
-            std::string role = msg.value("role", "user");
-            std::string content = msg.value("content", "");
-            
-            prompt << "<|im_start|>" << role << "\n"
-                   << content << "<|im_end|>\n";
-        }
-        
-        // Add generation prompt for assistant
-        prompt << "<|im_start|>assistant\n";
-        
-        std::cout << "[InferenceEngine] Applied Qwen/ChatML template" << std::endl;
-    } else {
-        // Try using the OGA's built-in chat template
-        try {
-            const char* template_str = chat_template_.empty() ? nullptr : chat_template_.c_str();
-            
-            auto result = tokenizer_->ApplyChatTemplate(
-                template_str,
-                messages_json.c_str(),
-                nullptr,
-                true
-            );
-            
-            return std::string(result);
-            
-        } catch (const std::exception& e) {
-            std::cerr << "[WARNING] OGA chat template failed: " << e.what() << std::endl;
-            std::cerr << "[WARNING] Using simple fallback template" << std::endl;
-            
-            // Simple fallback template
-            prompt.str("");  // Clear
-            for (const auto& msg : messages) {
-                std::string role = msg.value("role", "user");
-                std::string content = msg.value("content", "");
-                
-                if (role == "system") {
-                    prompt << "System: " << content << "\n\n";
-                } else if (role == "user") {
-                    prompt << "User: " << content << "\n\n";
-                } else if (role == "assistant") {
-                    prompt << "Assistant: " << content << "\n\n";
-                }
-            }
-            
-            prompt << "Assistant: ";
+    for (char c : name) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            result += std::tolower(static_cast<unsigned char>(c));
         }
     }
     
-    return prompt.str();
+    return result;
 }
 
-std::string InferenceEngine::resolveModelPath(const std::string& path) {
-    // If path has a "snapshots" subdirectory (Hugging Face cache structure),
-    // automatically find the latest snapshot
-    std::string snapshots_dir = path + "/snapshots";
+std::string InferenceEngine::extractModelName(const std::string& model_path) {
+    // Use the directory name as the model identifier
+    // This ensures each model has a unique name even if they have the same model_type
+    std::string dir_name = fs::path(model_path).filename().string();
+    std::cout << "[InferenceEngine] Model name from directory: " << dir_name << std::endl;
+    return dir_name;
+}
+
+LoadedModel* InferenceEngine::findModel(const std::string& model_name) {
+    std::string normalized = normalizeModelName(model_name);
+    
+    auto it = model_index_.find(normalized);
+    if (it != model_index_.end() && it->second < loaded_models_.size()) {
+        return &loaded_models_[it->second];
+    }
+    
+    // Also try partial match
+    for (auto& model : loaded_models_) {
+        std::string model_normalized = normalizeModelName(model.model_name);
+        if (model_normalized.find(normalized) != std::string::npos ||
+            normalized.find(model_normalized) != std::string::npos) {
+            return &model;
+        }
+    }
+    
+    return nullptr;
+}
+
+const LoadedModel* InferenceEngine::findModel(const std::string& model_name) const {
+    std::string normalized = normalizeModelName(model_name);
+    
+    auto it = model_index_.find(normalized);
+    if (it != model_index_.end() && it->second < loaded_models_.size()) {
+        return &loaded_models_[it->second];
+    }
+    
+    // Also try partial match
+    for (const auto& model : loaded_models_) {
+        std::string model_normalized = normalizeModelName(model.model_name);
+        if (model_normalized.find(normalized) != std::string::npos ||
+            normalized.find(model_normalized) != std::string::npos) {
+            return &model;
+        }
+    }
+    
+    return nullptr;
+}
+
+// ==================== Model Management ====================
+
+std::string InferenceEngine::loadModel(const std::string& model_path, BackendType backend_type) {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    // Resolve path (handle HuggingFace cache structure)
+    std::string resolved_path = model_path;
+    std::string snapshots_dir = model_path + "/snapshots";
     if (fs::exists(snapshots_dir) && fs::is_directory(snapshots_dir)) {
-        std::cout << "[InferenceEngine] Detected Hugging Face cache structure, looking for snapshot..." << std::endl;
-        
-        // Find the first (and usually only) snapshot directory
+        std::cout << "[InferenceEngine] Detected Hugging Face cache structure" << std::endl;
         for (const auto& entry : fs::directory_iterator(snapshots_dir)) {
             if (entry.is_directory()) {
-                std::string snapshot_path = entry.path().string();
-                std::cout << "[InferenceEngine] Found snapshot: " << snapshot_path << std::endl;
-                return snapshot_path;
-            }
-        }
-        
-        std::cerr << "[ERROR] No snapshot found in: " << snapshots_dir << std::endl;
-        return path;
-    }
-    
-    // Otherwise, use the path as-is
-    return path;
-}
-
-bool InferenceEngine::validateModelDirectory(const std::string& path) {
-    if (!fs::exists(path) || !fs::is_directory(path)) {
-        std::cerr << "[ERROR] Model path does not exist or is not a directory: " << path << std::endl;
-        return false;
-    }
-
-    // Check for required files
-    std::string onnx_config_path = path + "/genai_config.json";
-    std::string mlx_config_path = path + "/config.json";
-
-    bool has_onnx_config = fs::exists(onnx_config_path);
-    bool has_mlx_config = fs::exists(mlx_config_path);
-
-#ifdef MLX_ON
-    // MLX backend: accept either ONNX or MLX config files
-    if (!has_onnx_config && !has_mlx_config) {
-        std::cerr << "[ERROR] Required config file not found. Expected either:" << std::endl;
-        std::cerr << "[ERROR]   - " << onnx_config_path << " (ONNX models)" << std::endl;
-        std::cerr << "[ERROR]   - " << mlx_config_path << " (MLX models)" << std::endl;
-        return false;
-    }
-#else
-    // ONNX/RyzenAI backend: require ONNX config
-    if (!has_onnx_config) {
-        std::cerr << "[ERROR] Required file not found: " << onnx_config_path << std::endl;
-        return false;
-    }
-#endif
-
-    return true;
-}
-
-std::string InferenceEngine::detectRyzenAIVersion() {
-    // Check for Ryzen AI 1.6.0 installation
-    std::string ryzenai_path_16 = "C:/Program Files/RyzenAI/1.6.0";
-    if (fs::exists(ryzenai_path_16)) {
-        return "1.6.0";
-    }
-    
-    // Check for 1.5.0
-    std::string ryzenai_path_15 = "C:/Program Files/RyzenAI/1.5.0";
-    if (fs::exists(ryzenai_path_15)) {
-        return "1.5.0";
-    }
-    
-    // Check environment variable
-    const char* version_env = std::getenv("RYZENAI_VERSION");
-    if (version_env) {
-        return std::string(version_env);
-    }
-    
-    // Default to 1.6.0
-    return "1.6.0";
-}
-
-void InferenceEngine::loadRaiConfig() {
-    // Detect Ryzen AI version
-    ryzenai_version_ = detectRyzenAIVersion();
-    std::cout << "[InferenceEngine] Ryzen AI version: " << ryzenai_version_ << std::endl;
-    
-    // Load rai_config.json if it exists
-    std::string rai_config_path = model_path_ + "/rai_config.json";
-    if (fs::exists(rai_config_path)) {
-        try {
-            std::ifstream file(rai_config_path);
-            json config = json::parse(file);
-            
-            if (config.contains("max_prompt_length") && 
-                config["max_prompt_length"].contains(ryzenai_version_)) {
-                max_prompt_length_ = config["max_prompt_length"][ryzenai_version_];
-                std::cout << "[InferenceEngine] Loaded max_prompt_length from rai_config.json: " 
-                         << max_prompt_length_ << std::endl;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[WARNING] Failed to parse rai_config.json: " << e.what() << std::endl;
-        }
-    }
-}
-
-void InferenceEngine::setupExecutionProvider() {
-    std::cout << "[InferenceEngine] Setting up execution provider for mode: " << execution_mode_ << std::endl;
-    
-    // Note: Actual execution provider configuration happens in ONNX Runtime GenAI
-    // based on the genai_config.json file. This method is mainly for validation.
-    
-    if (execution_mode_ == "npu") {
-        std::cout << "[InferenceEngine] Using NPU (VitisAI) execution provider" << std::endl;
-    } else if (execution_mode_ == "hybrid") {
-        std::cout << "[InferenceEngine] Using Hybrid (NPU + iGPU) execution provider" << std::endl;
-    } else if (execution_mode_ == "cpu") {
-        std::cout << "[InferenceEngine] Using CPU execution provider" << std::endl;
-    }
-}
-
-void InferenceEngine::loadModel() {
-    try {
-        std::cout << "[InferenceEngine] Loading ONNX model from: " << model_path_ << std::endl;
-        
-        // Create model using factory method
-        model_ = OgaModel::Create(model_path_.c_str());
-        
-#ifdef MLX_ON
-        // Set context size from command line (flows to KV cache max length)
-        model_->max_context_length = ctx_size_;
-        std::cout << "[InferenceEngine] Set model max_context_length: " << ctx_size_ << std::endl;
-#endif
-        
-        // Create tokenizer using factory method
-        tokenizer_ = OgaTokenizer::Create(*model_);
-        
-        // Load chat template from tokenizer_config.json
-        std::string tokenizer_config_path = model_path_ + "/tokenizer_config.json";
-        if (fs::exists(tokenizer_config_path)) {
-            try {
-                std::ifstream file(tokenizer_config_path);
-                json config = json::parse(file);
-                if (config.contains("chat_template") && config["chat_template"].is_string()) {
-                    chat_template_ = config["chat_template"];
-                    std::cout << "[InferenceEngine] Loaded chat template from tokenizer_config.json" << std::endl;
-                }
-                
-#ifndef MLX_ON
-                // For non-MLX backends (Onyx/RYZENAI), load additional tokens into fallback_additional_tags_
-                // MLX backend loads these in OgaModel::Create via loadAdditionalTokens()
-                if (config.contains("added_tokens_decoder") && config["added_tokens_decoder"].is_object()) {
-                    for (const auto& [token_id_str, token_info] : config["added_tokens_decoder"].items()) {
-                        if (token_info.contains("content") && token_info["content"].is_string()) {
-                            std::string content = token_info["content"];
-                            SpecialTokenType type = SpecialTokenType::UNKNOWN;
-
-                            // Classify token based on content
-                            if (content == "<think>") {
-                                type = SpecialTokenType::THINKING_START;
-                            } else if (content == "</think>") {
-                                type = SpecialTokenType::THINKING_END;
-                            } else if (content == "<tool_call>") {
-                                type = SpecialTokenType::TOOL_CALL_START;
-                            } else if (content == "</tool_call>") {
-                                type = SpecialTokenType::TOOL_CALL_END;
-                            } else if (content == "<tool_response>") {
-                                type = SpecialTokenType::TOOL_RESPONSE_START;
-                            } else if (content == "</tool_response>") {
-                                type = SpecialTokenType::TOOL_RESPONSE_END;
-                            } else if (content == "<|im_end|>") {
-                                type = SpecialTokenType::CHAT_END;
-                            } else if (content == "<|eot_id|>" || content == "<|end_of_turn|>" ||
-                                       content == "<|end|>" || content == "<end_of_turn>") {
-                                type = SpecialTokenType::CHAT_END;
-                            }
-
-                            if (type != SpecialTokenType::UNKNOWN) {
-                                AdditionalToken token;
-                                token.content = content;
-                                token.type = type;
-                                try {
-                                    token.token_id = std::stoi(token_id_str);
-                                } catch (...) {
-                                    token.token_id = -1;
-                                }
-                                fallback_additional_tags_.push_back(token);
-                                std::cout << "[InferenceEngine] Loaded special token: '" << content
-                                          << "' (ID: " << token.token_id << ")" << std::endl;
-                            }
-                        }
-                    }
-                }
-#endif
-            } catch (const std::exception& e) {
-                std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
-            }
-        }
-        
-#ifndef MLX_ON
-        // Ensure we have fallback defaults if no tokens were found for non-MLX backends
-        if (fallback_additional_tags_.empty()) {
-            std::cout << "[InferenceEngine] No special tokens found, using fallback defaults" << std::endl;
-            
-            // Add basic thinking tokens with default values (token IDs unknown)
-            fallback_additional_tags_.push_back({"<think>", SpecialTokenType::THINKING_START, -1});
-            fallback_additional_tags_.push_back({"</think>", SpecialTokenType::THINKING_END, -1});
-            
-            // Add common chat end tokens
-            fallback_additional_tags_.push_back({"<|im_end|>", SpecialTokenType::CHAT_END, -1});
-            
-            // Add tool tokens
-            fallback_additional_tags_.push_back({"<tool_call>", SpecialTokenType::TOOL_CALL_START, -1});
-            fallback_additional_tags_.push_back({"</tool_call>", SpecialTokenType::TOOL_CALL_END, -1});
-            fallback_additional_tags_.push_back({"<tool_response>", SpecialTokenType::TOOL_RESPONSE_START, -1});
-            fallback_additional_tags_.push_back({"</tool_response>", SpecialTokenType::TOOL_RESPONSE_END, -1});
-        }
-        
-        std::cout << "[InferenceEngine] Loaded " << fallback_additional_tags_.size() 
-                  << " special tokens for streaming detection" << std::endl;
-#endif
-        
-        std::cout << "[InferenceEngine] Model and tokenizer loaded successfully" << std::endl;
-        
-    } catch (const std::exception& e) {
-        throw std::runtime_error("Failed to load model: " + std::string(e.what()));
-    }
-}
-
-std::vector<int32_t> InferenceEngine::truncatePrompt(const std::vector<int32_t>& input_ids) {
-    if (input_ids.size() <= static_cast<size_t>(max_prompt_length_)) {
-        return input_ids;
-    }
-    
-    // Truncate from the beginning to keep the most recent context
-    size_t truncate_amount = input_ids.size() - max_prompt_length_;
-    std::cout << "[WARNING] Prompt exceeds maximum length (" 
-              << input_ids.size() << " > " << max_prompt_length_ 
-              << "). Truncating " << truncate_amount << " tokens from the beginning."
-              << std::endl;
-    
-    return std::vector<int32_t>(
-        input_ids.begin() + truncate_amount, 
-        input_ids.end()
-    );
-}
-
-std::string InferenceEngine::complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing) {
-    std::lock_guard<std::mutex> lock(inference_mutex_);
-    
-    try {
-        // ==================== PROFILING START ====================
-        auto total_start = std::chrono::high_resolution_clock::now();
-        auto tokenize_start = total_start;
-        
-        auto sequences = OgaSequences::Create();
-        tokenizer_->Encode(prompt.c_str(), *sequences);
-        
-        auto tokenize_end = std::chrono::high_resolution_clock::now();
-        
-        const int32_t* input_ids_ptr = sequences->SequenceData(0);
-        size_t input_ids_count = sequences->SequenceCount(0);
-        std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
-        input_ids = truncatePrompt(input_ids);
-        
-        auto gen_params = OgaGeneratorParams::Create(*model_);
-        gen_params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + params.max_length);
-        gen_params->SetSearchOption("temperature", params.temperature);
-        gen_params->SetSearchOption("top_p", params.top_p);
-        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
-        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
-        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-        gen_params->SetSearchOption("random_seed", 1.0);
-
-        int eos_id = model_->GetEosId();
-        gen_params->SetSearchOption("eos_token_id", eos_id);
-        gen_params->SetSearchOption("pad_token_id", eos_id);
-        
-        auto generator = OgaGenerator::Create(*model_, *gen_params);
-#ifdef MLX_ON
-        generator->SetTokenizer(*tokenizer_);
-#endif
-        generator->AppendTokens(input_ids.data(), input_ids.size());
-        
-        std::cout << "[InferenceEngine] Generating..." << std::endl;
-
-        // OPTIMIZATION: Pre-compute stop token IDs (avoid string decode every token)
-        // NOTE: Only stop on CHAT_END tokens, NOT THINKING_END!
-        // The model should complete thinking then continue with the answer.
-        std::vector<int32_t> stop_token_ids;
-#ifdef MLX_ON
-        // Get CHAT_END token IDs only (not THINKING_END)
-        for (const auto& tag : model_->additional_tags) {
-            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
-                stop_token_ids.push_back(tag.token_id);
-            }
-        }
-#else
-        for (const auto& tag : fallback_additional_tags_) {
-            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
-                stop_token_ids.push_back(tag.token_id);
-            }
-        }
-#endif
-
-        // Track generated token IDs for final decode (avoids per-token string decode)
-        std::vector<int32_t> generated_tokens;
-        generated_tokens.reserve(params.max_length);
-        
-        auto prefill_start = std::chrono::high_resolution_clock::now();
-        bool first_token = true;
-        auto decode_start = prefill_start;
-
-        while (!generator->IsDone()) {
-            generator->GenerateNextToken();
-            
-            if (first_token) {
-                decode_start = std::chrono::high_resolution_clock::now();
-                first_token = false;
-            }
-
-            const int32_t* seq = generator->GetSequenceData(0);
-            size_t seq_count = generator->GetSequenceCount(0);
-            if (seq_count > 0) {
-                int32_t new_token = seq[seq_count - 1];
-                
-                // FAST: Check EOS (integer comparison)
-                if (model_->IsEos(new_token)) break;
-                
-                // FAST: Check stop token IDs (integer comparison, no string decode)
-                bool is_stop_token = false;
-                for (int32_t stop_id : stop_token_ids) {
-                    if (new_token == stop_id) {
-                        is_stop_token = true;
-                        break;
-                    }
-                }
-                if (is_stop_token) break;
-                
-                // Store token ID for batch decode at end
-                generated_tokens.push_back(new_token);
-            }
-        }
-        
-        auto end_time = std::chrono::high_resolution_clock::now();
-        
-        const int32_t* output_ptr = generator->GetSequenceData(0);
-        size_t output_count = generator->GetSequenceCount(0);
-        
-        if (out_timing) {
-            int generated_count = (output_count > input_ids.size()) ? (output_count - input_ids.size()) : 0;
-            auto total = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - total_start);
-            out_timing->total_time_ms = static_cast<double>(total.count());
-            out_timing->token_count = generated_count;
-            
-            // Detailed profiling
-            out_timing->tokenize_ms = std::chrono::duration<double, std::milli>(tokenize_end - tokenize_start).count();
-            out_timing->prefill_ms = std::chrono::duration<double, std::milli>(decode_start - prefill_start).count();
-            out_timing->decode_ms = std::chrono::duration<double, std::milli>(end_time - decode_start).count();
-            
-            // Print profile summary
-            std::cout << "[PROFILE] tokenize=" << out_timing->tokenize_ms << "ms"
-                      << " prefill=" << out_timing->prefill_ms << "ms"
-                      << " decode=" << out_timing->decode_ms << "ms"
-                      << " (" << generated_count << " tokens @ " 
-                      << (generated_count * 1000.0 / out_timing->decode_ms) << " tok/s)" << std::endl;
-        }
-        
-        std::string result;
-        if (output_count > input_ids.size()) {
-            // Trim EOS if present at the very end
-            size_t decode_count = output_count - input_ids.size();
-            if (decode_count > 0 && output_ptr[output_count-1] == eos_id) {
-                decode_count--;
-            }
-            auto decoded = tokenizer_->Decode(output_ptr + input_ids.size(), decode_count);
-            result = std::string(decoded);
-        }
-        
-        // Strip custom stop sequences
-        for (const auto& stop_seq : params.stop_sequences) {
-            size_t pos = result.find(stop_seq);
-            if (pos != std::string::npos) result = result.substr(0, pos);
-        }
-        
-        return result;
-        
-    } catch (const std::exception& e) {
-        throw std::runtime_error("Inference failed: " + std::string(e.what()));
-    }
-}
-
-void InferenceEngine::streamComplete(const std::string& prompt, 
-                                     const GenerationParams& params,
-                                     StreamCallback callback) {
-    std::lock_guard<std::mutex> lock(inference_mutex_);
-    
-    try {
-        auto sequences = OgaSequences::Create();
-        tokenizer_->Encode(prompt.c_str(), *sequences);
-        
-        const int32_t* input_ids_ptr = sequences->SequenceData(0);
-        size_t input_ids_count = sequences->SequenceCount(0);
-        std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
-        input_ids = truncatePrompt(input_ids);
-        
-        auto gen_params = OgaGeneratorParams::Create(*model_);
-        int total_max_length = static_cast<int>(input_ids.size()) + params.max_length;
-        gen_params->SetSearchOption("max_length", total_max_length);
-        gen_params->SetSearchOption("temperature", params.temperature);
-        gen_params->SetSearchOption("top_p", params.top_p);
-        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
-        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
-        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-        gen_params->SetSearchOption("random_seed", 1.0);
-
-        int eos_id = model_->GetEosId();
-        gen_params->SetSearchOption("eos_token_id", eos_id);
-        gen_params->SetSearchOption("pad_token_id", eos_id);
-        
-        auto generator = OgaGenerator::Create(*model_, *gen_params);
-#ifdef MLX_ON
-        generator->SetTokenizer(*tokenizer_);
-#endif
-        generator->AppendTokens(input_ids.data(), input_ids.size());
-        
-        std::cout << "[InferenceEngine] Streaming... (EOS Token ID: " << eos_id << ")" << std::endl;
-
-        // Get model-specific stop sequences
-        std::vector<std::string> model_stop_sequences;
-#ifdef MLX_ON
-        model_stop_sequences = model_->GetStopSequences();
-#endif
-
-        auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer_);
-        size_t token_count = 0;
-        std::string accumulated_output;
-        bool client_disconnected = false;
-
-        // Get CHAT_END token IDs for additional stop checking
-        std::vector<int32_t> chat_end_token_ids;
-#ifdef MLX_ON
-        for (const auto& tag : model_->additional_tags) {
-            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
-                chat_end_token_ids.push_back(tag.token_id);
-                std::cout << "[InferenceEngine] Added CHAT_END token ID: " << tag.token_id << " ('" << tag.content << "')" << std::endl;
-            }
-        }
-#else
-        for (const auto& tag : fallback_additional_tags_) {
-            if (tag.type == SpecialTokenType::CHAT_END && tag.token_id >= 0) {
-                chat_end_token_ids.push_back(tag.token_id);
-                std::cout << "[InferenceEngine] Added CHAT_END token ID: " << tag.token_id << " ('" << tag.content << "')" << std::endl;
-            }
-        }
-#endif
-        
-        if (chat_end_token_ids.empty()) {
-            std::cout << "[InferenceEngine] WARNING: No CHAT_END token IDs found!" << std::endl;
-        }
-
-        while (!generator->IsDone() && !client_disconnected) {
-            generator->GenerateNextToken();
-
-            const int32_t* all_tokens = generator->GetSequenceData(0);
-            size_t num_tokens = generator->GetSequenceCount(0);
-            int32_t new_token = all_tokens[num_tokens - 1];
-
-            // Even if the backend logic misses it, we force break here.
-            if (model_->IsEos(new_token)) {
-                std::cout << "[InferenceEngine] Hit EOS token - Stopping." << std::endl;
+                resolved_path = entry.path().string();
+                std::cout << "[InferenceEngine] Resolved to snapshot: " << resolved_path << std::endl;
                 break;
             }
-            
-            // Also check for CHAT_END token IDs (e.g., <|im_end|> for Qwen)
-            bool is_chat_end = false;
-            for (int32_t chat_end_id : chat_end_token_ids) {
-                if (new_token == chat_end_id) {
-                    std::cout << "[InferenceEngine] Hit CHAT_END token (ID: " << new_token << ") - Stopping." << std::endl;
-                    is_chat_end = true;
-                    break;
-                }
-            }
-            if (is_chat_end) break;
-
-            const char* decoded = tokenizer_stream->Decode(new_token);
-            if (decoded && decoded[0] != '\0') {
-                std::string token_str(decoded);
-
-                // Stop Sequence Check
-                bool should_stop = false;
-
-                // Check params stop sequences
-                for (const auto& stop_seq : params.stop_sequences) {
-                    std::string temp = accumulated_output + token_str;
-                    if (temp.find(stop_seq) != std::string::npos) {
-                        should_stop = true;
-                        break;
-                    }
-                }
-
-                // Check model-specific stop sequences
-                if (!should_stop) {
-                    for (const auto& stop_seq : model_stop_sequences) {
-                        std::string temp = accumulated_output + token_str;
-                        if (temp.find(stop_seq) != std::string::npos) {
-                            std::cout << "[InferenceEngine] Stop sequence detected: '" << stop_seq << "' - Stopping streaming." << std::endl;
-                            should_stop = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (should_stop) break;
-
-                accumulated_output += token_str;
-                bool is_final = generator->IsDone();
-
-                if (!callback(token_str, is_final)) {
-                    client_disconnected = true;
-                    std::cout << "[InferenceEngine] Client disconnected" << std::endl;
-                    break;
-                }
-            }
-            token_count++;
         }
-        
-        std::cout << "[InferenceEngine] Streamed " << token_count << " tokens." << std::endl;
-        
-    } catch (const std::exception& e) {
-        throw std::runtime_error("Streaming inference failed: " + std::string(e.what()));
     }
+    
+    // Validate model directory
+    if (!fs::exists(resolved_path) || !fs::is_directory(resolved_path)) {
+        throw std::runtime_error("Model path does not exist: " + resolved_path);
+    }
+    
+    // Extract model name
+    std::string model_name = extractModelName(resolved_path);
+    std::string normalized = normalizeModelName(model_name);
+    
+    // Check if already loaded
+    if (model_index_.find(normalized) != model_index_.end()) {
+        std::cout << "[InferenceEngine] Model already loaded: " << model_name << std::endl;
+        return model_name;
+    }
+    
+    // Auto-detect backend if needed
+    BackendType actual_type = backend_type;
+    if (actual_type == BackendType::AUTO) {
+        actual_type = BackendRegistry::instance().detectBestBackend();
+        std::cout << "[InferenceEngine] Auto-detected backend: " 
+                  << backendTypeToString(actual_type) << std::endl;
+    }
+    
+    // Create backend and load model
+    std::cout << "[InferenceEngine] Loading model: " << model_name 
+              << " on backend: " << backendTypeToString(actual_type) << std::endl;
+    
+    auto backend = BackendRegistry::instance().create(actual_type, resolved_path);
+    
+    // Create LoadedModel entry
+    LoadedModel loaded;
+    loaded.backend = std::move(backend);
+    loaded.model_name = model_name;
+    loaded.model_path = resolved_path;
+    loaded.backend_type = actual_type;
+    
+    // Add to vector and index
+    size_t index = loaded_models_.size();
+    loaded_models_.push_back(std::move(loaded));
+    model_index_[normalized] = index;
+    
+    std::cout << "[InferenceEngine] Successfully loaded model: " << model_name 
+              << " (total loaded: " << loaded_models_.size() << ")" << std::endl;
+    
+    return model_name;
+}
+
+void InferenceEngine::unloadModel(const std::string& model_name) {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    std::string normalized = normalizeModelName(model_name);
+    auto it = model_index_.find(normalized);
+    
+    if (it == model_index_.end()) {
+        std::cerr << "[WARNING] Cannot unload - model not found: " << model_name << std::endl;
+        return;
+    }
+    
+    size_t index = it->second;
+    std::cout << "[InferenceEngine] Unloading model: " << loaded_models_[index].model_name << std::endl;
+    
+    // Remove from vector
+    loaded_models_.erase(loaded_models_.begin() + index);
+    
+    // Rebuild index
+    model_index_.clear();
+    for (size_t i = 0; i < loaded_models_.size(); ++i) {
+        std::string norm = normalizeModelName(loaded_models_[i].model_name);
+        model_index_[norm] = i;
+    }
+    
+    std::cout << "[InferenceEngine] Model unloaded (remaining: " << loaded_models_.size() << ")" << std::endl;
+}
+
+std::vector<std::string> InferenceEngine::getLoadedModels() const {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    std::vector<std::string> names;
+    names.reserve(loaded_models_.size());
+    
+    for (const auto& model : loaded_models_) {
+        names.push_back(model.model_name);
+    }
+    
+    return names;
+}
+
+IBackend* InferenceEngine::getBackendForModel(const std::string& model_name) {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    LoadedModel* model = findModel(model_name);
+    if (!model) {
+        throw std::runtime_error("Model not loaded: " + model_name);
+    }
+    
+    return model->backend.get();
+}
+
+const IBackend* InferenceEngine::getBackendForModel(const std::string& model_name) const {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    const LoadedModel* model = findModel(model_name);
+    if (!model) {
+        throw std::runtime_error("Model not loaded: " + model_name);
+    }
+    
+    return model->backend.get();
+}
+
+IBackend* InferenceEngine::getDefaultBackend() {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    if (loaded_models_.empty()) {
+        return nullptr;
+    }
+    
+    return loaded_models_[0].backend.get();
+}
+
+// ==================== Model-Specific Inference ====================
+
+std::string InferenceEngine::complete(const std::string& model_name,
+                                       const std::string& prompt,
+                                       const GenerationParams& params,
+                                       CompletionTimingData* out_timing) {
+    IBackend* backend = getBackendForModel(model_name);
+    return backend->complete(prompt, params, out_timing);
+}
+
+void InferenceEngine::streamComplete(const std::string& model_name,
+                                      const std::string& prompt,
+                                      const GenerationParams& params,
+                                      StreamCallback callback) {
+    IBackend* backend = getBackendForModel(model_name);
+    backend->streamComplete(prompt, params, callback);
+}
+
+std::string InferenceEngine::applyChatTemplate(const std::string& model_name,
+                                                const std::string& messages_json,
+                                                const std::string& tools_json) {
+    IBackend* backend = getBackendForModel(model_name);
+    return backend->applyChatTemplate(messages_json, tools_json);
+}
+
+int InferenceEngine::countTokens(const std::string& model_name, const std::string& text) {
+    IBackend* backend = getBackendForModel(model_name);
+    return backend->countTokens(text);
+}
+
+// ==================== Model Info ====================
+
+std::string InferenceEngine::getModelType(const std::string& model_name) const {
+    const IBackend* backend = getBackendForModel(model_name);
+    return backend->getModelType();
+}
+
+int InferenceEngine::getMaxContextLength(const std::string& model_name) const {
+    const IBackend* backend = getBackendForModel(model_name);
+    return backend->getMaxContextLength();
+}
+
+GenerationParams InferenceEngine::getDefaultParams(const std::string& model_name) const {
+    const IBackend* backend = getBackendForModel(model_name);
+    return backend->getDefaultParams();
+}
+
+const std::vector<AdditionalToken>& InferenceEngine::getSpecialTokens(const std::string& model_name) const {
+    const IBackend* backend = getBackendForModel(model_name);
+    return backend->getSpecialTokens();
+}
+
+// ==================== Backward Compatibility ====================
+
+std::string InferenceEngine::complete(const std::string& prompt,
+                                       const GenerationParams& params,
+                                       CompletionTimingData* out_timing) {
+    IBackend* backend = getDefaultBackend();
+    if (!backend) {
+        throw std::runtime_error("No models loaded");
+    }
+    return backend->complete(prompt, params, out_timing);
+}
+
+void InferenceEngine::streamComplete(const std::string& prompt,
+                                      const GenerationParams& params,
+                                      StreamCallback callback) {
+    IBackend* backend = getDefaultBackend();
+    if (!backend) {
+        throw std::runtime_error("No models loaded");
+    }
+    backend->streamComplete(prompt, params, callback);
+}
+
+std::string InferenceEngine::applyChatTemplate(const std::string& messages_json,
+                                                const std::string& tools_json) {
+    IBackend* backend = getDefaultBackend();
+    if (!backend) {
+        throw std::runtime_error("No models loaded");
+    }
+    return backend->applyChatTemplate(messages_json, tools_json);
 }
 
 int InferenceEngine::countTokens(const std::string& text) {
-    try {
-        auto sequences = OgaSequences::Create();
-        tokenizer_->Encode(text.c_str(), *sequences);
-        return static_cast<int>(sequences->SequenceCount(0));
-    } catch (const std::exception& e) {
-        std::cerr << "[WARNING] Failed to count tokens: " << e.what() << std::endl;
+    IBackend* backend = getDefaultBackend();
+    if (!backend) {
         return 0;
     }
+    return backend->countTokens(text);
+}
+
+std::string InferenceEngine::getModelName() const {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    if (loaded_models_.empty()) {
+        return "";
+    }
+    return loaded_models_[0].model_name;
+}
+
+GenerationParams InferenceEngine::getDefaultParams() const {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    if (loaded_models_.empty()) {
+        return default_params_;
+    }
+    return loaded_models_[0].backend->getDefaultParams();
+}
+
+const std::vector<AdditionalToken>& InferenceEngine::getAdditionalTags() const {
+    std::lock_guard<std::mutex> lock(models_mutex_);
+    
+    if (loaded_models_.empty()) {
+        return empty_tokens_;
+    }
+    return loaded_models_[0].backend->getSpecialTokens();
 }
 
 } // namespace ryzenai
-

@@ -16,7 +16,7 @@
 using namespace mlx::core;
 
 
-GemmaInference::GemmaInference(const OgaModel& model) : model_(model) {
+GemmaInference::GemmaInference(const MlxOgaModel& model) : model_(model) {
     sliding_window_ = 512;
 
     // Determine actual hidden size from weights or config
@@ -67,7 +67,7 @@ GemmaInference::GemmaInference(const OgaModel& model) : model_(model) {
  * Embeds input tokens, processes through layers, and projects to vocabulary.
  */
 array GemmaInference::forward(const std::vector<int32_t>& input_tokens,
-                             const OgaGeneratorParams& params) {
+                             const MlxOgaGeneratorParams& params) {
     int seq_len = static_cast<int>(input_tokens.size());
 
     auto embed_it = model_.weights.find("embed_tokens.weight");
@@ -249,7 +249,7 @@ array GemmaInference::mlp_block(const array& hidden_states, const std::string& p
  * Samples next token from logits.
  * Uses temperature scaling when sampling is enabled.
  */
-int GemmaInference::sample_token(const array& logits, const OgaGeneratorParams& params) {
+int GemmaInference::sample_token(const array& logits, const MlxOgaGeneratorParams& params) {
     if (params.do_sample) {
         if (params.temperature > 0.0f) {
             array scaled_logits = logits / params.temperature;

@@ -29,7 +29,7 @@ using namespace mlx::core;
 static std::vector<std::string> layer_prefixes_;
 
 
-Qwen3Inference::Qwen3Inference(const OgaModel& model) 
+Qwen3Inference::Qwen3Inference(const MlxOgaModel& model) 
     : model_(model), cache_initialized_(false), cache_position_(0), step_(0) {
     actual_hidden_size_ = model_.hidden_size;
     tie_word_embeddings_ = model_.tie_word_embeddings;
@@ -205,7 +205,7 @@ array Qwen3Inference::create_causal_mask(int seq_len, int offset) {
  *   #   "causal" for efficient causal masking during prefill
  */
 array Qwen3Inference::forward(const std::vector<int32_t>& input_tokens,
-                              const OgaGeneratorParams& params) {
+                              const MlxOgaGeneratorParams& params) {
     int seq_len = static_cast<int>(input_tokens.size());
     bool is_prefill = (seq_len > 1);
 
@@ -350,7 +350,7 @@ array Qwen3Inference::mlp_block(const array& x, const std::string& prefix) {
 /*
  * sample_token
  */
-int Qwen3Inference::sample_token(const array& logits, const OgaGeneratorParams& params) {
+int Qwen3Inference::sample_token(const array& logits, const MlxOgaGeneratorParams& params) {
     if (!params.do_sample || params.temperature <= 0.0f) {
         return static_cast<int>(argmax(logits).item<int32_t>());
     }

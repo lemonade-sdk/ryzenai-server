@@ -22,7 +22,7 @@ public:
      * Qwen3NextInference
      * Initializes the inference engine with model weights and configuration.
      */
-    Qwen3NextInference(const OgaModel& model);
+    Qwen3NextInference(const MlxOgaModel& model);
 
     /*
      * forward
@@ -30,16 +30,16 @@ public:
      * Returns logits for the final token position.
      */
     array forward(const std::vector<int32_t>& input_tokens,
-                  const OgaGeneratorParams& params) override;
+                  const MlxOgaGeneratorParams& params) override;
 
     /*
      * sample_token
      * Selects the next token from output logits.
      */
-    int sample_token(const array& logits, const OgaGeneratorParams& params) override;
+    int sample_token(const array& logits, const MlxOgaGeneratorParams& params) override;
 
 private:
-    const OgaModel& model_;
+    const MlxOgaModel& model_;
     int actual_hidden_size_;
     int head_dim_;
     int full_attention_interval_;

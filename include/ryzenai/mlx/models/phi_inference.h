@@ -18,15 +18,15 @@
 
 class PhiInference : public BaseInferenceEngine {
 public:
-    PhiInference(const OgaModel& model);
+    PhiInference(const MlxOgaModel& model);
 
     array forward(const std::vector<int32_t>& input_tokens,
-                  const OgaGeneratorParams& params) override;
+                  const MlxOgaGeneratorParams& params) override;
 
-    int sample_token(const array& logits, const OgaGeneratorParams& params) override;
+    int sample_token(const array& logits, const MlxOgaGeneratorParams& params) override;
 
 private:
-    const OgaModel& model_;
+    const MlxOgaModel& model_;
     int actual_hidden_size_;
     int head_dim_;
     float partial_rotary_factor_;

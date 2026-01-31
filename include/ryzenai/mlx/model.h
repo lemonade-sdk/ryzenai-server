@@ -9,38 +9,24 @@
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/quantization.h"
+#include "ryzenai/types.h"
 #include <unordered_map>
 #include <string>
 #include <vector>
 
-// Enum for special token types used in streaming detection
-enum class SpecialTokenType {
-    THINKING_START,
-    THINKING_END,
-    TOOL_CALL_START,
-    TOOL_CALL_END,
-    TOOL_RESPONSE_START,
-    TOOL_RESPONSE_END,
-    CHAT_START,
-    CHAT_END,
-    UNKNOWN
-};
-
-// Struct to store additional special tokens with their types
-struct AdditionalToken {
-    std::string content;
-    SpecialTokenType type;
-    int32_t token_id = -1; // Token ID if available, -1 if not
-};
+// Use common types from types.h
+using ryzenai::SpecialTokenType;
+using ryzenai::AdditionalToken;
 
 
 /*
- * OgaModel
+ * MlxOgaModel
  * 
  * Contains model configuration, quantization settings, and weight tensors.
  * Loaded from safetensors format with config.json for architecture params.
+ * Named MlxOga* to distinguish from ONNX OGA types.
  */
-struct OgaModel {
+struct MlxOgaModel {
     std::string model_path;
     std::vector<int32_t> eos_token_ids = {2};
     int vocab_size = 32000;
@@ -76,7 +62,7 @@ struct OgaModel {
      * Factory function that loads model from directory.
      * Reads config.json and model.safetensors.
      */
-    static std::unique_ptr<OgaModel> Create(const char* model_path);
+    static std::unique_ptr<MlxOgaModel> Create(const char* model_path);
 
     /*
      * is_quantized

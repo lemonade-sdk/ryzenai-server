@@ -72,9 +72,8 @@ GenerationParams RyzenAIServer::createGenerationParams(int max_tokens, float tem
 }
 
 void RyzenAIServer::loadModel() {
-    std::cout << "[Server] Loading model..." << std::endl;
-    std::cout << "[Server] Model path: " << args_.model_path << std::endl;
-    std::cout << "[Server] Execution mode: " << args_.mode << std::endl;
+    std::cout << "[Server] Loading models..." << std::endl;
+    std::cout << "[Server] Number of models to load: " << args_.models.size() << std::endl;
     
     try {
         // Create optimization settings from command line args
@@ -84,18 +83,41 @@ void RyzenAIServer::loadModel() {
         opt.kv_cache = args_.kv_cache;
         opt.prefill_chunk = args_.prefill_chunk;
         
-        inference_engine_ = std::make_unique<InferenceEngine>(
-            args_.model_path,
-            args_.mode,
-            opt
-        );
+        // Create inference engine with optimization settings
+        inference_engine_ = std::make_unique<InferenceEngine>(opt);
         
-        model_id_ = extractModelName(args_.model_path);
+        // Load all models from command line
+        for (const auto& model_config : args_.models) {
+            std::cout << "\n[Server] Loading: " << model_config.path 
+                      << " (backend: " << model_config.backend << ")" << std::endl;
+            
+            // Determine backend type
+            BackendType backend_type = parseBackendType(model_config.backend);
+            
+            // Load the model
+            std::string loaded_name = inference_engine_->loadModel(model_config.path, backend_type);
+            
+            // Use first model as primary ID for backward compatibility
+            if (model_id_.empty()) {
+                model_id_ = loaded_name;
+            }
+            
+            std::cout << "[Server] [OK] Loaded: " << loaded_name << std::endl;
+        }
         
-        std::cout << "[Server] [OK] Model loaded: " << model_id_ << std::endl;
-        std::cout << "[Server] [OK] Execution mode: " << inference_engine_->getExecutionMode() << std::endl;
-        std::cout << "[Server] [OK] Max prompt length: " << inference_engine_->getMaxPromptLength() << " tokens" << std::endl;
-        std::cout << "[Server] [OK] Ryzen AI version: " << inference_engine_->getRyzenAIVersion() << std::endl;
+        // Print summary
+        auto loaded_models = inference_engine_->getLoadedModels();
+        std::cout << "\n[Server] ========== Models Summary ==========" << std::endl;
+        for (const auto& name : loaded_models) {
+            try {
+                const auto* backend = inference_engine_->getBackendForModel(name);
+                std::cout << "[Server]   - " << name << " (" << backend->getName() 
+                          << ", ctx: " << backend->getMaxContextLength() << ")" << std::endl;
+            } catch (...) {
+                std::cout << "[Server]   - " << name << std::endl;
+            }
+        }
+        std::cout << "[Server] =========================================\n" << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "\n[ERROR] Failed to load model: " << e.what() << std::endl;
@@ -147,6 +169,11 @@ void RyzenAIServer::setupRoutes() {
         handleResponses(req, res);
     });
     
+    // Models endpoint - OpenAI compatible
+    http_server_->Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
+        handleModels(res);
+    });
+    
     // Root redirect
     http_server_->Get("/", [this](const httplib::Request&, httplib::Response& res) {
         json response = {
@@ -181,9 +208,14 @@ void RyzenAIServer::handleHealth(const httplib::Request& req, httplib::Response&
         {"model", model_id_},
         {"execution_mode", inference_engine_->getExecutionMode()},
         {"model_path", args_.model_path},
-        {"max_prompt_length", inference_engine_->getMaxPromptLength()},
-        {"ryzenai_version", inference_engine_->getRyzenAIVersion()}
+        {"loaded_models", inference_engine_->getLoadedModels()}
     };
+    
+    // Add backend-specific info if available
+    if (auto* backend = inference_engine_->getDefaultBackend()) {
+        response["backend"] = backend->getName();
+        response["max_context_length"] = backend->getMaxContextLength();
+    }
     
     res.set_content(response.dump(2), "application/json");
 }
@@ -319,13 +351,17 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             return;
         }
         
-        // 2. Prepare Prompt
+        // Determine which model to use (fall back to default if not specified)
+        std::string requested_model = chat_req.model.empty() ? model_id_ : chat_req.model;
+        std::cout << "[Server] Chat completion request for model: " << requested_model << std::endl;
+        
+        // 2. Prepare Prompt (using model-specific applyChatTemplate)
         json messages_array = json::array();
         for (const auto& msg : chat_req.messages) {
             messages_array.push_back({{"role", msg.role}, {"content", msg.content}});
         }
         std::string tools_json = chat_req.tools.empty() ? "" : chat_req.tools.dump();
-        std::string prompt = inference_engine_->applyChatTemplate(messages_array.dump(), tools_json);
+        std::string prompt = inference_engine_->applyChatTemplate(requested_model, messages_array.dump(), tools_json);
         
         // -----------------------------------------------------------------------
         // ROBUST PARSING LOGIC using model-specific tags
@@ -349,19 +385,19 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                 chat_req.top_k, chat_req.repeat_penalty, chat_req.stop
             );
             
-            std::string model_id = model_id_;
+            std::string model_for_response = requested_model;
             bool has_tools = !chat_req.tools.empty();
             
             res.set_chunked_content_provider("text/event-stream",
-                [this, prompt, params, model_id, has_tools](size_t offset, httplib::DataSink& sink) {
+                [this, prompt, params, model_for_response, requested_model, has_tools](size_t offset, httplib::DataSink& sink) {
                     if (offset > 0) return false;
                     try {
                         // Use model-specific tags for both MLX and Onyx backends
                         ReasoningStreamParser parser(inference_engine_->getAdditionalTags());
                         std::string full_response; // Buffer for tool extraction
 
-                        inference_engine_->streamComplete(prompt, params,
-                            [&sink, model_id, &parser, &full_response, has_tools](const std::string& token, bool is_final) -> bool {
+                        inference_engine_->streamComplete(requested_model, prompt, params,
+                            [&sink, &model_for_response, &parser, &full_response, has_tools](const std::string& token, bool is_final) -> bool {
                                 if (has_tools) full_response += token;
 
                                 auto parsed = parser.consume(token);
@@ -378,12 +414,12 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                                 };
 
                                 if (parsed.has_reasoning && !parsed.reasoning_content.empty()) {
-                                    std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + escape(parsed.reasoning_content) + "\"},\"finish_reason\":null}]}\n\n";
+                                    std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_for_response + "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + escape(parsed.reasoning_content) + "\"},\"finish_reason\":null}]}\n\n";
                                     sink.write(chunk.c_str(), chunk.size());
                                 }
                                 if (!parsed.regular_content.empty()) {
                                     std::string finish = is_final ? "\"stop\"" : "null";
-                                    std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + escape(parsed.regular_content) + "\"},\"finish_reason\":" + finish + "}]}\n\n";
+                                    std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_for_response + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + escape(parsed.regular_content) + "\"},\"finish_reason\":" + finish + "}]}\n\n";
                                     sink.write(chunk.c_str(), chunk.size());
                                 }
                                 
@@ -403,7 +439,7 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                                 std::string args = tc.arguments.dump();
                                 std::string esc_args; 
                                 for(char c : args) { if(c=='"') esc_args+="\\\""; else if(c=='\\') esc_args+="\\\\"; else esc_args+=c; }
-                                std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_id + "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_auto\",\"type\":\"function\",\"function\":{\"name\":\"" + tc.name + "\",\"arguments\":\"" + esc_args + "\"}}]},\"finish_reason\":null}]}\n\n";
+                                std::string chunk = "data: {\"id\":\"chatcmpl-" + std::to_string(std::time(nullptr)) + "\",\"object\":\"chat.completion.chunk\",\"created\":" + std::to_string(std::time(nullptr)) + ",\"model\":\"" + model_for_response + "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_auto\",\"type\":\"function\",\"function\":{\"name\":\"" + tc.name + "\",\"arguments\":\"" + esc_args + "\"}}]},\"finish_reason\":null}]}\n\n";
                                 sink.write(chunk.c_str(), chunk.size());
                             }
                         }
@@ -427,7 +463,8 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             );
             
             CompletionTimingData timing;
-            std::string output = inference_engine_->complete(prompt, params, &timing);
+            // Use model-specific complete
+            std::string output = inference_engine_->complete(requested_model, prompt, params, &timing);
             
             // Apply Robust Parsing
             auto [reasoning, content] = robust_parse(output);
@@ -454,14 +491,14 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                 {"id", "chatcmpl-" + std::to_string(std::time(nullptr))},
                 {"object", "chat.completion"},
                 {"created", std::time(nullptr)},
-                {"model", model_id_},
+                {"model", requested_model},
                 {"choices", {{
                     {"index", 0},
                     {"message", message},
                     {"finish_reason", "stop"}
                 }}},
                 {"usage", {
-                    {"prompt_tokens", inference_engine_->countTokens(prompt)},
+                    {"prompt_tokens", inference_engine_->countTokens(requested_model, prompt)},
                     {"completion_tokens", timing.token_count},
                     {"total_tokens", timing.token_count},
                     {"completion_time_ms", timing.total_time_ms}
@@ -485,8 +522,10 @@ void RyzenAIServer::run() {
     std::cout << "\n";
     std::cout << "Available endpoints:\n";
     std::cout << "  GET  http://" << args_.host << ":" << args_.port << "/health\n";
+    std::cout << "  GET  http://" << args_.host << ":" << args_.port << "/v1/models\n";
     std::cout << "  POST http://" << args_.host << ":" << args_.port << "/v1/completions\n";
     std::cout << "  POST http://" << args_.host << ":" << args_.port << "/v1/chat/completions\n";
+    std::cout << "  POST http://" << args_.host << ":" << args_.port << "/v1/responses\n";
     std::cout << "\n";
     std::cout << "Press Ctrl+C to stop the server\n";
     std::cout << "===============================================================\n\n";
@@ -724,6 +763,39 @@ void RyzenAIServer::stop() {
         http_server_->stop();
         running_ = false;
     }
+}
+
+void RyzenAIServer::handleModels(httplib::Response& res) {
+    // OpenAI-compatible /v1/models endpoint
+    json models_array = json::array();
+    
+    auto loaded_models = inference_engine_->getLoadedModels();
+    for (const auto& name : loaded_models) {
+        json model_obj = {
+            {"id", name},
+            {"object", "model"},
+            {"created", std::time(nullptr)},
+            {"owned_by", "ryzenai-server"}
+        };
+        
+        // Add backend-specific info if available
+        try {
+            const auto* backend = inference_engine_->getBackendForModel(name);
+            model_obj["backend"] = backend->getName();
+            model_obj["max_context_length"] = backend->getMaxContextLength();
+        } catch (...) {
+            // Backend info not available
+        }
+        
+        models_array.push_back(model_obj);
+    }
+    
+    json response = {
+        {"object", "list"},
+        {"data", models_array}
+    };
+    
+    res.set_content(response.dump(2), "application/json");
 }
 
 } // namespace ryzenai

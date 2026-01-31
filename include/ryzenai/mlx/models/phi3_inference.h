@@ -49,7 +49,7 @@ public:
      * @param model The loaded OGA model
      * @param kv_cache_mode KV cache quantization mode (default: INT8 for optimal performance)
      */
-    Phi3Inference(const OgaModel& model, KVCacheMode kv_cache_mode = KVCacheMode::INT8);
+    Phi3Inference(const MlxOgaModel& model, KVCacheMode kv_cache_mode = KVCacheMode::INT8);
 
     /*
      * forward
@@ -57,14 +57,14 @@ public:
      * Returns logits for the final token position.
      */
     array forward(const std::vector<int32_t>& input_tokens,
-                  const OgaGeneratorParams& params) override;
+                  const MlxOgaGeneratorParams& params) override;
 
     /*
      * sample_token
      * Selects the next token from output logits.
      * Supports temperature scaling for sampling.
      */
-    int sample_token(const array& logits, const OgaGeneratorParams& params) override;
+    int sample_token(const array& logits, const MlxOgaGeneratorParams& params) override;
     
     /*
      * supports_kv_cache
@@ -81,7 +81,7 @@ public:
 private:
     mlx::core::array mask_val_;
 
-    const OgaModel& model_;
+    const MlxOgaModel& model_;
     int actual_hidden_size_;
     int head_dim_;
     int max_cache_length_;
