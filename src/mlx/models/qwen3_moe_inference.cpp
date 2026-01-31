@@ -474,16 +474,6 @@ void Qwen3MoEInference::setup_weight_references() {
         layer.post_attn_layernorm = get_weight(p + "post_attention_layernorm.weight");
         layer.attention.qkv_proj = setup_linear(p + "self_attn.qkv_proj");
         layer.attention.o_proj = setup_linear(p + "self_attn.o_proj");
-        
-        // Debug: print first layer's attention weight shapes
-        if (i == 0) {
-            std::cout << "[Debug] Layer 0 QKV weight: " 
-                      << (layer.attention.qkv_proj.weight ? layer.attention.qkv_proj.weight->shape() : std::vector<int>{}) 
-                      << " scales: " << (layer.attention.qkv_proj.scales ? "yes" : "no") << std::endl;
-            std::cout << "[Debug] Layer 0 O_proj weight: " 
-                      << (layer.attention.o_proj.weight ? layer.attention.o_proj.weight->shape() : std::vector<int>{})
-                      << " scales: " << (layer.attention.o_proj.scales ? "yes" : "no") << std::endl;
-        }
         layer.attention.q_norm = get_weight(p + "self_attn.q_norm.weight");
         layer.attention.k_norm = get_weight(p + "self_attn.k_norm.weight");
         
