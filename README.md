@@ -1,4 +1,4 @@
-# Ryzen AI LLM Server
+# Ryzen AI LLM Server (Onnx & MLX) - Waiting for ROCm to land on MLX main
 
 A lightweight, OpenAI API-compatible server for running LLMs on AMD Ryzen AI NPUs using ONNX Runtime GenAI.
 
