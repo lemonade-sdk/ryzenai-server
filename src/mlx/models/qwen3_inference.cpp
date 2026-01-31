@@ -413,9 +413,42 @@ void Qwen3Inference::cache_weights() {
         auto k_norm = w.find(p + "self_attn.k_norm.weight");
         if (k_norm != w.end()) cached_weights_.emplace(p + "self_attn.k_norm.weight", k_norm->second);
         
-        cache_weight(p + "self_attn.q_proj");
-        cache_weight(p + "self_attn.k_proj");
-        cache_weight(p + "self_attn.v_proj");
+        // OPTIMIZATION: Fuse Q/K/V projections into single QKV (3 matmuls → 1)
+        auto q_weight = w.find(p + "self_attn.q_proj.weight");
+        auto k_weight = w.find(p + "self_attn.k_proj.weight");
+        auto v_weight = w.find(p + "self_attn.v_proj.weight");
+        
+        if (q_weight != w.end() && k_weight != w.end() && v_weight != w.end()) {
+            // Fuse weights: concatenate along output dimension (dim 0)
+            array fused_qkv = concatenate({q_weight->second, k_weight->second, v_weight->second}, 0);
+            cached_weights_.emplace(p + "self_attn.qkv_proj.weight", fused_qkv);
+            
+            // Fuse scales if quantized
+            auto q_scales = w.find(p + "self_attn.q_proj.scales");
+            auto k_scales = w.find(p + "self_attn.k_proj.scales");
+            auto v_scales = w.find(p + "self_attn.v_proj.scales");
+            
+            if (q_scales != w.end() && k_scales != w.end() && v_scales != w.end()) {
+                array fused_scales = concatenate({q_scales->second, k_scales->second, v_scales->second}, 0);
+                cached_weights_.emplace(p + "self_attn.qkv_proj.scales", fused_scales);
+                
+                // Fuse biases if present
+                auto q_biases = w.find(p + "self_attn.q_proj.biases");
+                auto k_biases = w.find(p + "self_attn.k_proj.biases");
+                auto v_biases = w.find(p + "self_attn.v_proj.biases");
+                
+                if (q_biases != w.end() && k_biases != w.end() && v_biases != w.end()) {
+                    array fused_biases = concatenate({q_biases->second, k_biases->second, v_biases->second}, 0);
+                    cached_weights_.emplace(p + "self_attn.qkv_proj.biases", fused_biases);
+                }
+            }
+            
+            if (i == 0) {
+                std::cout << "[Qwen3Inference] Fused QKV projection for layer " << i 
+                          << " (shape: " << fused_qkv.shape() << ")" << std::endl;
+            }
+        }
+        
         cache_weight(p + "self_attn.o_proj");
         
         cache_weight(p + "mlp.gate_proj");
@@ -481,10 +514,8 @@ void Qwen3Inference::setup_weight_references() {
         layer.input_layernorm = get_weight(p + "input_layernorm.weight");
         layer.post_attn_layernorm = get_weight(p + "post_attention_layernorm.weight");
         
-        // Attention weights
-        layer.attention.q_proj = setup_linear(p + "self_attn.q_proj");
-        layer.attention.k_proj = setup_linear(p + "self_attn.k_proj");
-        layer.attention.v_proj = setup_linear(p + "self_attn.v_proj");
+        // Attention weights - use fused QKV if available
+        layer.attention.qkv_proj = setup_linear(p + "self_attn.qkv_proj");
         layer.attention.o_proj = setup_linear(p + "self_attn.o_proj");
         layer.attention.q_norm = get_weight(p + "self_attn.q_norm.weight");
         layer.attention.k_norm = get_weight(p + "self_attn.k_norm.weight");
@@ -553,13 +584,18 @@ array Qwen3Inference::self_attention_fast(const array& x, const ryzenai::mlx::La
                                            int layer_idx, const std::string& mask_type) {
     int B = static_cast<int>(x.shape(0));
     int L = static_cast<int>(x.shape(1));
+    int q_size = model_.num_attention_heads * head_dim_;
+    int kv_size = model_.num_key_value_heads * head_dim_;
     
-    // Direct Q/K/V projections (Qwen3 architecture)
-    array queries = reshape(linear_fast(x, layer.attention.q_proj), 
+    // OPTIMIZED: Single fused QKV projection (3 matmuls → 1)
+    array qkv = linear_fast(x, layer.attention.qkv_proj);
+    
+    // Split fused output into Q, K, V
+    array queries = reshape(slice(qkv, {0, 0, 0}, {B, L, q_size}), 
                            {B, L, model_.num_attention_heads, head_dim_});
-    array keys = reshape(linear_fast(x, layer.attention.k_proj), 
+    array keys = reshape(slice(qkv, {0, 0, q_size}, {B, L, q_size + kv_size}), 
                         {B, L, model_.num_key_value_heads, head_dim_});
-    array values = reshape(linear_fast(x, layer.attention.v_proj), 
+    array values = reshape(slice(qkv, {0, 0, q_size + kv_size}, {B, L, q_size + 2 * kv_size}), 
                           {B, L, model_.num_key_value_heads, head_dim_});
     
     // 2. Q/K Normalization using direct references
