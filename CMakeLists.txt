@@ -248,7 +248,7 @@ if(BUILD_RYZEN)
 endif()
 
 if(BUILD_MLX)
-    target_compile_definitions(ryzenai-server PRIVATE BUILD_MLX MLX_ON)
+    target_compile_definitions(ryzenai-server PRIVATE BUILD_MLX MLX_ON USE_MLX)
     if(MLX_CUDA)
         target_compile_definitions(ryzenai-server PRIVATE MLX_CUDA_ON)
     endif()

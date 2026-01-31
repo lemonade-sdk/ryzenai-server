@@ -3,6 +3,7 @@
  * 
  * Qwen3 Mixture of Experts (MoE) model inference engine for MLX backend.
  * Supports Qwen3-30B-A3B, Qwen3-235B-A22B, Qwen3-Coder-30B-A3B variants.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  * 
  * Architecture based on mlx-lm/models/qwen3_moe.py:
  *   - Same Qwen3 attention (Q/K normalization, RoPE)
@@ -18,6 +19,8 @@
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
@@ -187,3 +190,5 @@ private:
      */
     void initialize_moe_layer_lazy(int layer_idx);
 };
+
+#endif // USE_MLX

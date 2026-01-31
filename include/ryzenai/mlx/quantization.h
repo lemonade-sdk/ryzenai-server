@@ -5,7 +5,10 @@
  * 
  * Low-bit weight quantization support for MLX inference.
  * Handles 2, 4, and 8-bit affine quantization with group-wise scaling.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include <unordered_map>
@@ -89,3 +92,5 @@ array dequantize_weight(const array& quantized_weight, const array& scales,
 array apply_quantization(const array& weight, const std::string& base_name,
                          const std::unordered_map<std::string, array>& weights,
                          const QuantizationConfig& config = QuantizationConfig());
+
+#endif // USE_MLX

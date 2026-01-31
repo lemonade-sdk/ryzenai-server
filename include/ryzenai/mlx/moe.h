@@ -5,9 +5,12 @@
  * - Fused Gate/Up projections to reduce kernel launches.
  * - Pre-transposed weights for direct gather_mm usage.
  * - Shape-aware helper functions to avoid CPU-side vector conversions.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include <mlx/mlx.h>
 #include <optional>
@@ -151,3 +154,5 @@ array swiglu(const array& gate, const array& up);
 
 }  // namespace moe
 }  // namespace ryzenai
+
+#endif // USE_MLX

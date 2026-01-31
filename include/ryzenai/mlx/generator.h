@@ -3,9 +3,12 @@
  * 
  * Token generation orchestration for MLX models.
  * Manages the autoregressive generation loop and sampling parameters.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
@@ -105,3 +108,5 @@ struct MlxOgaGenerator {
 private:
     int sample_token(const array& logits);
 };
+
+#endif // USE_MLX

@@ -4,6 +4,7 @@
  * Phi-3 model inference engine for MLX backend.
  * Implements the Phi-3 architecture with combined QKV projections
  * and SwiGLU MLP blocks.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  * 
  * Optimizations:
  *   - Quantized KV Cache (INT8) for 2x memory bandwidth reduction
@@ -18,6 +19,8 @@
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
@@ -182,3 +185,5 @@ private:
      */
     array mlp_block_no_residual(const array& hidden_states, const std::string& prefix);
 };
+
+#endif // USE_MLX

@@ -3,6 +3,7 @@
  * 
  * INT8 quantized KV cache for transformer inference.
  * Reduces memory bandwidth by 2x compared to FP16, enabling higher GPU utilization.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  * 
  * Strategy:
  *   - Pre-allocated INT8 buffers for K/V storage
@@ -16,6 +17,8 @@
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include <vector>
 #include <utility>
@@ -355,3 +358,5 @@ private:
 };
 
 } // namespace ryzenai::mlx
+
+#endif // USE_MLX

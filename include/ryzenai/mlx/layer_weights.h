@@ -3,11 +3,14 @@
  * 
  * Generic layer weight structures for efficient inference.
  * Provides direct weight references to eliminate hash map lookups in hot paths.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  * 
  * Used by all model inference engines (Qwen3, LLaMA, Phi, Gemma, etc.)
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include <vector>
 #include <mlx/array.h>
@@ -115,3 +118,5 @@ struct ModelWeights {
 };
 
 } // namespace ryzenai::mlx
+
+#endif // USE_MLX

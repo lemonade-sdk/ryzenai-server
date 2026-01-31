@@ -3,6 +3,7 @@
  * 
  * Qwen3 model inference engine for MLX backend.
  * Closely follows the Python mlx-lm/models/qwen3.py implementation.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  * 
  * Implements the Qwen3 architecture with:
  *   - Separate Q/K/V projections
@@ -18,6 +19,8 @@
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
@@ -180,3 +183,5 @@ private:
      */
     void setup_weight_references();
 };
+
+#endif // USE_MLX

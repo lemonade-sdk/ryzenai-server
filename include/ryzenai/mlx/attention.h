@@ -4,9 +4,12 @@
  * Attention helper functions for MLX inference.
  * Provides a stable interface for scaled dot-product attention
  * that matches the Python mlx-lm implementation.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include <mlx/mlx.h>
 #include <mlx/fast.h>
@@ -390,3 +393,5 @@ public:
 
 } // namespace mlx
 } // namespace ryzenai
+
+#endif // USE_MLX

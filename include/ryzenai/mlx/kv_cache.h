@@ -3,11 +3,14 @@
  * 
  * Shared KV cache utility for transformer inference engines.
  * Pre-allocates fixed-size buffers to avoid per-token memory allocation.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  * 
  * Used by: Qwen3, Phi3, LLaMA, Mixtral, etc.
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include <vector>
 #include <utility>
@@ -179,3 +182,5 @@ private:
 };
 
 } // namespace ryzenai::mlx
+
+#endif // USE_MLX

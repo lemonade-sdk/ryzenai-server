@@ -3,9 +3,12 @@
  * 
  * Model configuration and weight storage for MLX inference.
  * Holds all model parameters and loaded weight tensors.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/quantization.h"
@@ -104,3 +107,5 @@ struct MlxOgaModel {
      */
     std::vector<std::string> GetStopSequences() const;
 };
+
+#endif // USE_MLX

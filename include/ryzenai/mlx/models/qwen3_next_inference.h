@@ -4,9 +4,12 @@
  * Qwen3-Next model inference engine for MLX backend.
  * Implements hybrid architecture with GatedDeltaNet (linear attention),
  * full attention, and Mixture of Experts (MoE).
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
  */
 
 #pragma once
+
+#ifdef USE_MLX
 
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/model.h"
@@ -95,3 +98,5 @@ private:
      */
     bool is_moe_layer(int layer_idx) const;
 };
+
+#endif // USE_MLX

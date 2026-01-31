@@ -1,4 +1,14 @@
+/*
+ * tokenizer.h
+ * 
+ * Tokenizer interface for MLX backend.
+ * Only compiled when USE_MLX is defined (macOS with Apple Silicon).
+ */
+
 #pragma once
+
+#ifdef USE_MLX
+
 #include <string>
 #include <vector>
 #include <memory>
@@ -51,3 +61,5 @@ private:
     std::string accumulated;
     std::string decoded_buffer;
 };
+
+#endif // USE_MLX
