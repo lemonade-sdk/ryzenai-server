@@ -37,4 +37,4 @@ external/
 # OS
 .DS_Store
 Thumbs.db
-models
+/models
