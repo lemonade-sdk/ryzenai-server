@@ -67,6 +67,7 @@ private:
     std::string chat_template_;
     int max_context_length_ = 4096;
     int eos_token_id_ = 2;
+    std::vector<int> eos_token_ids_;  // Additional EOS tokens (for models with multiple)
     std::vector<AdditionalToken> special_tokens_;
     GenerationParams default_params_;
     bool has_default_params_ = false;

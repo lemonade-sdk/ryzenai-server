@@ -1,0 +1,17 @@
+{
+  "model": "Phi-3-mini-4k-instruct-4bit",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a creative and knowledgeable AI assistant with expertise in science, technology, history, and storytelling. Provide detailed, well-structured responses with rich content."
+    },
+    {
+      "role": "user",
+      "content": "Write me a comprehensive and engaging explanation about how neural networks learn. Cover the fundamental concepts including neurons, weights, biases, activation functions, forward propagation, backpropagation, and gradient descent. Include real-world analogies to make it accessible to beginners, but also include enough technical depth for someone wanting to truly understand the mathematics behind it. Explain why deep learning has become so powerful in recent years and what challenges remain."
+    }
+  ],
+  "max_tokens": 2048,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "stream": false
+}

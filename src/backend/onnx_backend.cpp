@@ -246,8 +246,8 @@ std::string OnnxBackend::complete(const std::string& prompt, const GenerationPar
         if (seq_count > 0) {
             int32_t new_token = seq[seq_count - 1];
             
-            // Check EOS
-            if (new_token == eos_token_id_) break;
+            // Check EOS (handles models with multiple EOS tokens)
+            if (isEos(new_token)) break;
             
             // Check special stop tokens
             bool is_stop = false;
@@ -367,8 +367,8 @@ void OnnxBackend::streamComplete(const std::string& prompt, const GenerationPara
         const int32_t* seq = OgaGenerator_GetSequenceData(generator, 0);
         int32_t new_token = seq[seq_count - 1];
         
-        // Check EOS
-        if (new_token == eos_token_id_) break;
+        // Check EOS (handles models with multiple EOS tokens)
+        if (isEos(new_token)) break;
         
         // Check special stop tokens
         for (const auto& token : special_tokens_) {
@@ -426,7 +426,12 @@ int OnnxBackend::getEosTokenId() const {
 }
 
 bool OnnxBackend::isEos(int32_t token_id) const {
-    return token_id == eos_token_id_;
+    if (token_id == eos_token_id_) return true;
+    // Check additional EOS tokens (for models with multiple EOS tokens like Qwen2.5)
+    for (int eos_id : eos_token_ids_) {
+        if (token_id == eos_id) return true;
+    }
+    return false;
 }
 
 const std::vector<AdditionalToken>& OnnxBackend::getSpecialTokens() const {
@@ -450,7 +455,22 @@ void OnnxBackend::loadConfig() {
         }
         
         if (config.contains("model") && config["model"].contains("eos_token_id")) {
-            eos_token_id_ = config["model"]["eos_token_id"];
+            auto& eos = config["model"]["eos_token_id"];
+            if (eos.is_number()) {
+                // Single EOS token ID
+                eos_token_id_ = eos.get<int>();
+            } else if (eos.is_array() && !eos.empty()) {
+                // Array of EOS token IDs - use the first one as primary
+                eos_token_id_ = eos[0].get<int>();
+                // Store additional EOS tokens as CHAT_END special tokens
+                for (size_t i = 1; i < eos.size(); ++i) {
+                    AdditionalToken token;
+                    token.content = "";  // Will be filled by tokenizer if needed
+                    token.type = SpecialTokenType::CHAT_END;
+                    token.token_id = eos[i].get<int>();
+                    eos_token_ids_.push_back(eos[i].get<int>());
+                }
+            }
         }
         
     } catch (const std::exception& e) {
