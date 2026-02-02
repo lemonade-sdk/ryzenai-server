@@ -1,10 +1,8 @@
 /*
  * qwen3_moe_inference.cpp
- * * Optimized Qwen3 MoE Inference Implementation.
- * Features:
- * - Robust weight loading (Prefix detection, Missing weight handling).
- * - Fused Gate+Up Projection for maximum GPU throughput.
- * - Null-safe forward pass.
+ *
+ * Optimized Qwen3 MoE Inference Implementation.
+ * Features weight loading, fused projections, and null-safe forward pass.
  */
 
 #include "ryzenai/mlx/models/qwen3_moe_inference.h"
@@ -21,6 +19,12 @@ using namespace mlx::core;
 
 static std::vector<std::string> layer_prefixes_;
 
+/*
+ * Qwen3MoEInference constructor
+ *
+ * Initializes the inference engine, sets up dimensions, loads configuration,
+ * and pre-allocates KV cache.
+ */
 Qwen3MoEInference::Qwen3MoEInference(const MlxOgaModel& model) 
     : model_(model), cache_initialized_(false), cache_position_(0), step_(0) {
     
@@ -28,14 +32,12 @@ Qwen3MoEInference::Qwen3MoEInference(const MlxOgaModel& model)
     tie_word_embeddings_ = model_.tie_word_embeddings;
     intermediate_size_ = model_.intermediate_size;
 
-    // Head dim calculation
     if (model_.head_dim > 0) {
         head_dim_ = model_.head_dim;
     } else {
         head_dim_ = actual_hidden_size_ / model_.num_attention_heads;
     }
     
-    // Load Config
     std::string config_path = model_.model_path + "/config.json";
     std::ifstream f(config_path);
     if (f.is_open()) {
@@ -128,13 +130,28 @@ Qwen3MoEInference::Qwen3MoEInference(const MlxOgaModel& model)
     }
 }
 
+/*
+ * clear_cache
+ *
+ * Resets the KV cache position and step counter.
+ */
 void Qwen3MoEInference::clear_cache() { step_ = 0; cache_position_ = 0; }
 
+/*
+ * is_moe_layer
+ *
+ * Determines if a given layer index corresponds to a Mixture of Experts layer.
+ */
 bool Qwen3MoEInference::is_moe_layer(int layer_idx) const {
     if (mlp_only_layers_.count(layer_idx)) return false;
     return (moe_config_.num_experts > 0 && (layer_idx + 1) % moe_config_.decoder_sparse_step == 0);
 }
 
+/*
+ * forward
+ *
+ * Performs a single inference step, processing input tokens through all layers.
+ */
 array Qwen3MoEInference::forward(const std::vector<int32_t>& input_tokens, const MlxOgaGeneratorParams& params) {
     int seq_len = static_cast<int>(input_tokens.size());
     if (seq_len > 1) clear_cache();
@@ -222,29 +239,38 @@ array Qwen3MoEInference::forward(const std::vector<int32_t>& input_tokens, const
     return reshape(linear_fast(last_h, lm_head_), {model_.vocab_size});
 }
 
+/*
+ * rms_norm_fast
+ *
+ * Applies root mean square normalization to the input array.
+ */
 array Qwen3MoEInference::rms_norm_fast(const array& x, const array* weight) {
     if (!weight) return x;
     return fast::rms_norm(x, *weight, model_.rms_norm_eps);
 }
 
+/*
+ * linear_fast
+ *
+ * Performs matrix multiplication, supporting both quantized and full-precision weights.
+ */
 array Qwen3MoEInference::linear_fast(const array& x, const ryzenai::mlx::LinearWeights& w) {
     if (!w.weight) throw std::runtime_error("linear_fast: weight is null");
-    
-    // Debug: print shapes for diagnosis
-    std::cout << "[linear_fast] x=" << x.shape() << " weight=" << w.weight->shape();
-    if (w.scales) std::cout << " scales=" << w.scales->shape();
-    std::cout << " quantized=" << (w.is_quantized() ? "yes" : "no") << std::endl;
     
     if (w.is_quantized()) {
         std::optional<array> biases_opt = w.biases ? std::optional(*w.biases) : std::nullopt;
         return quantized_matmul(x, *w.weight, *w.scales, biases_opt, true, w.group_size, w.bits, "affine");
     }
-    // Note: We assume standard linear layers are pre-transposed in cache_weights
     array output = w.has_pretransposed() ? matmul(x, *w.weight_T) : matmul(x, transpose(*w.weight, {1, 0}));
     if (w.biases) output = output + *w.biases;
     return output;
 }
 
+/*
+ * self_attention_fast
+ *
+ * Computes self-attention with KV caching and rotary position embeddings.
+ */
 array Qwen3MoEInference::self_attention_fast(const array& x, const Qwen3MoELayerWeights& layer,
                                               int layer_idx, const std::string& mask_type) {
     return ryzenai::mlx::Attention::self_attention_fast_impl(
@@ -254,23 +280,25 @@ array Qwen3MoEInference::self_attention_fast(const array& x, const Qwen3MoELayer
     );
 }
 
-// Optimized Dense MLP Block using Fused GateUp
+/*
+ * dense_mlp_block
+ *
+ * Implements a standard dense Feed-Forward Network block with SwiGLU activation.
+ */
 array Qwen3MoEInference::dense_mlp_block(const array& x, const ryzenai::mlx::MLPWeights& mlp) {
-    // 1. Fused Gate + Up
     array gate_up = linear_fast(x, mlp.gate_proj);
     
-    // 2. Split and SwiGLU
     auto chunks = split(gate_up, 2, -1);
     array activated = ryzenai::moe::swiglu(chunks[0], chunks[1]);
     
-    // 3. Down Projection
     return linear_fast(activated, mlp.down_proj);
 }
 
-// ==========================================
-// IMPROVED CACHING & FUSION LOGIC
-// ==========================================
-
+/*
+ * cache_weights
+ *
+ * Loads, fuses, and caches model weights from the MlxOgaModel.
+ */
 void Qwen3MoEInference::cache_weights() {
     cached_weights_.clear();
     const auto& w = model_.weights;
@@ -280,7 +308,6 @@ void Qwen3MoEInference::cache_weights() {
         return;
     }
     
-    // Detect Prefix (model.layers vs layers)
     std::string prefix_base = "";
     if (w.find("model.layers.0.input_layernorm.weight") != w.end()) {
         prefix_base = "model.";

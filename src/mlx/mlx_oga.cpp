@@ -1,6 +1,6 @@
 /*
  * mlx_oga.cpp
- * 
+ *
  * Core model loading and generation orchestration for MLX backend.
  * Provides ONNX GenAI compatible interface for model loading,
  * parameter configuration, and token generation.
@@ -19,31 +19,19 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 
 using namespace mlx::core;
 namespace fs = std::filesystem;
 
-/*
- * loadAdditionalTokens
- *
- * Forward declaration for loading additional special tokens.
- */
 void loadAdditionalTokens(MlxOgaModel* model);
 
-/*
- * MlxOgaModel::Create
- * * Loads a model from the specified directory.
- * Reads config.json for model parameters and loads weights from safetensors.
- * Automatically detects quantization settings.
- * * UPDATE: Added support for sharded weights (model-00001-of-XXXX.safetensors)
- */
 std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
     auto model = std::make_unique<MlxOgaModel>();
     model->model_path = model_path;
 
     model->quantization = detect_quantization_config(model_path);
 
-    // 1. Heuristic Defaults (Fallback)
     std::string lower_path = model_path;
     std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
 
@@ -57,7 +45,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
         model->eos_token_ids = {107, 1};
     }
 
-    // 2. Try to load from config (Overrides heuristic if present)
     std::string config_path = model->model_path + "/tokenizer_config.json";
 
     if (fs::exists(config_path)) {
@@ -76,8 +63,7 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                     }
                 }
             }
-            
-            // Check added_tokens_decoder
+
             if (j.contains("eos_token") && j["eos_token"].is_string()) {
                 std::string eos_str = j["eos_token"];
                 if (j.contains("added_tokens_decoder") && j["added_tokens_decoder"].is_object()) {
@@ -94,7 +80,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
         } catch(...) {}
     }
 
-    // Check generation_config.json
     config_path = model->model_path + "/generation_config.json";
     if (fs::exists(config_path)) {
         try {
@@ -121,7 +106,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
     }
     std::cout << std::endl;
 
-    // Load Model Config
     std::string model_config_path = model->model_path + "/config.json";
     if (fs::exists(model_config_path)) {
         std::ifstream f(model_config_path);
@@ -141,8 +125,7 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
             if (config.contains("head_dim")) model->head_dim = config["head_dim"];
             else model->head_dim = 0;
             if (config.contains("model_type")) model->model_type = config["model_type"];
-            
-            // MoE-specific configuration
+
             if (config.contains("num_experts")) model->num_experts = config["num_experts"];
             if (config.contains("num_experts_per_tok")) model->num_experts_per_tok = config["num_experts_per_tok"];
             if (config.contains("decoder_sparse_step")) model->decoder_sparse_step = config["decoder_sparse_step"];
@@ -154,8 +137,7 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                     }
                 }
             }
-            
-            // Additional check for EOS in config.json
+
             if (config.contains("eos_token_id")) {
                 auto& eos = config["eos_token_id"];
                 if (eos.is_number_integer()) {
@@ -177,8 +159,7 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                           << ", group_size=" << model->quantization.group_size;
             }
             std::cout << std::endl;
-            
-            // Print MoE-specific configuration if present
+
             if (model->num_experts > 0) {
                 std::cout << "[Model] MoE config: num_experts=" << model->num_experts
                           << ", experts_per_tok=" << model->num_experts_per_tok
@@ -203,9 +184,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
         std::cerr << "[Model] config.json not found, using defaults" << std::endl;
     }
 
-    // -------------------------------------------------------------------------
-    // WEIGHT LOADING LOGIC (Fix for Sharded Models)
-    // -------------------------------------------------------------------------
     std::vector<std::string> weight_files;
     try {
         for (const auto& entry : fs::directory_iterator(model->model_path)) {
@@ -213,7 +191,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                 weight_files.push_back(entry.path().string());
             }
         }
-        // Sort to ensure deterministic load order
         std::sort(weight_files.begin(), weight_files.end());
     } catch (const std::exception& e) {
         std::cerr << "[Model] Error scanning directory: " << e.what() << std::endl;
@@ -223,22 +200,18 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
         try {
             for (const auto& file_path : weight_files) {
                 std::cout << "[Model] Loading weights from: " << file_path << std::endl;
-                
+
                 auto loaded_data = load_safetensors(file_path);
                 auto& loaded_weights = loaded_data.first;
 
                 for (const auto& [key, value] : loaded_weights) {
                     std::string mlx_key = key;
 
-                    // Clean key name logic
                     std::string final_key = mlx_key;
                     if (final_key.find("model.") == 0) {
                         final_key = final_key.substr(6);
                     }
 
-                    // Key normalization for quantization suffixes
-                    // (Removes .weight from suffixes like .scales.weight if accidentally present)
-                    // The logic below mimics the original code's behavior
                     if (final_key.size() > 7 && final_key.substr(final_key.size() - 7) == ".weight") {
                         std::string without_weight = final_key.substr(0, final_key.size() - 7);
                         if (without_weight.size() > 7 && without_weight.substr(without_weight.size() - 7) == ".scales") {
@@ -250,13 +223,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
                         }
                     }
 
-                    // MoE weight key normalization
-                    // HuggingFace Qwen3 MoE uses: layers.X.mlp.experts.Y.gate_proj.weight
-                    // Our code expects: layers.X.mlp.switch_mlp.gate_proj.weight (stacked)
-                    // We need to handle expert weights specially - they may come as individual
-                    // experts or already stacked as switch_mlp format
-                    // Note: The actual stacking is done in qwen3_moe_inference.cpp cache_weights()
-
                     model->weights.emplace(final_key, value);
                 }
             }
@@ -264,7 +230,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
 
         } catch (const std::exception& e) {
             std::cerr << "[Model] Safetensors load error: " << e.what() << std::endl;
-            // Only fall back to dummy weights if NO weights were loaded successfully
             if (model->weights.empty()) {
                 goto create_dummy;
             }
@@ -274,7 +239,6 @@ std::unique_ptr<MlxOgaModel> MlxOgaModel::Create(const char* model_path) {
         goto create_dummy;
     }
 
-    // Skip dummy creation if weights loaded
     goto load_tokens;
 
 create_dummy:
@@ -284,19 +248,15 @@ create_dummy:
         model->weights.emplace("lm_head.weight", random::normal({model->vocab_size, model->hidden_size}, 0.0f, 0.02f));
         model->weights.emplace("model.norm.weight", ones({model->hidden_size}));
 
-        // Determine if this is an MoE model
         bool is_moe_model = model->num_experts > 0;
         int moe_intermediate = model->moe_intermediate_size > 0 ? model->moe_intermediate_size : model->intermediate_size;
         int dense_intermediate = model->intermediate_size > 0 ? model->intermediate_size : 4 * model->hidden_size;
-        
-        // Helper to check if a layer is MoE (based on decoder_sparse_step and mlp_only_layers)
+
         auto is_moe_layer = [&](int layer_idx) -> bool {
             if (!is_moe_model) return false;
-            // Check if in mlp_only_layers
             for (int idx : model->mlp_only_layers) {
                 if (idx == layer_idx) return false;
             }
-            // Check decoder_sparse_step
             return (layer_idx + 1) % model->decoder_sparse_step == 0;
         };
 
@@ -304,45 +264,38 @@ create_dummy:
             std::string prefix = "layers." + std::to_string(i) + ".";
             model->weights.emplace(prefix + "input_layernorm.weight", ones({model->hidden_size}));
             model->weights.emplace(prefix + "post_attention_layernorm.weight", ones({model->hidden_size}));
-            
-            // Attention (with Q/K norm for Qwen3)
+
             model->weights.emplace(prefix + "self_attn.q_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
             model->weights.emplace(prefix + "self_attn.k_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
             model->weights.emplace(prefix + "self_attn.v_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
             model->weights.emplace(prefix + "self_attn.o_proj.weight", random::normal({model->hidden_size, model->hidden_size}, 0.0f, 0.02f));
-            
-            // Q/K norm weights for Qwen3 MoE
+
             int head_dim = model->head_dim > 0 ? model->head_dim : model->hidden_size / model->num_attention_heads;
             model->weights.emplace(prefix + "self_attn.q_norm.weight", ones({head_dim}));
             model->weights.emplace(prefix + "self_attn.k_norm.weight", ones({head_dim}));
 
             if (is_moe_layer(i)) {
-                // MoE Layer: Create router and expert weights
-                // Router weight: [hidden_size, num_experts]
-                model->weights.emplace(prefix + "mlp.gate.weight", 
+                model->weights.emplace(prefix + "mlp.gate.weight",
                     random::normal({model->num_experts, model->hidden_size}, 0.0f, 0.02f));
-                
-                // Expert weights (stacked): [num_experts, out_dim, in_dim]
-                // switch_mlp format for SwitchGLU
-                model->weights.emplace(prefix + "mlp.switch_mlp.gate_proj.weight", 
+
+                model->weights.emplace(prefix + "mlp.switch_mlp.gate_proj.weight",
                     random::normal({model->num_experts, moe_intermediate, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "mlp.switch_mlp.up_proj.weight", 
+                model->weights.emplace(prefix + "mlp.switch_mlp.up_proj.weight",
                     random::normal({model->num_experts, moe_intermediate, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "mlp.switch_mlp.down_proj.weight", 
+                model->weights.emplace(prefix + "mlp.switch_mlp.down_proj.weight",
                     random::normal({model->num_experts, model->hidden_size, moe_intermediate}, 0.0f, 0.02f));
             } else {
-                // Dense MLP Layer
-                model->weights.emplace(prefix + "mlp.gate_proj.weight", 
+                model->weights.emplace(prefix + "mlp.gate_proj.weight",
                     random::normal({dense_intermediate, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "mlp.up_proj.weight", 
+                model->weights.emplace(prefix + "mlp.up_proj.weight",
                     random::normal({dense_intermediate, model->hidden_size}, 0.0f, 0.02f));
-                model->weights.emplace(prefix + "mlp.down_proj.weight", 
+                model->weights.emplace(prefix + "mlp.down_proj.weight",
                     random::normal({model->hidden_size, dense_intermediate}, 0.0f, 0.02f));
             }
         }
-        
+
         if (is_moe_model) {
-            std::cout << "[Model] Created dummy MoE weights for " << model->num_hidden_layers 
+            std::cout << "[Model] Created dummy MoE weights for " << model->num_hidden_layers
                       << " layers (" << model->num_experts << " experts)" << std::endl;
         } else {
             std::cout << "[Model] Created dummy weights for " << model->num_hidden_layers << " layers" << std::endl;
@@ -363,7 +316,6 @@ load_tokens:
 void loadAdditionalTokens(MlxOgaModel* model) {
     std::string model_path = model->model_path;
 
-    // 1. Load from added_tokens.json
     std::string added_tokens_path = model_path + "/added_tokens.json";
     if (fs::exists(added_tokens_path)) {
         try {
@@ -374,7 +326,6 @@ void loadAdditionalTokens(MlxOgaModel* model) {
                 if (!content.empty() && token_id.is_number_integer()) {
                     SpecialTokenType type = SpecialTokenType::UNKNOWN;
 
-                    // Classify token based on content
                     if (content == "<think>") {
                         type = SpecialTokenType::THINKING_START;
                     } else if (content == "</think>") {
@@ -387,7 +338,6 @@ void loadAdditionalTokens(MlxOgaModel* model) {
                         type = SpecialTokenType::TOOL_RESPONSE_START;
                     } else if (content == "</tool_response>") {
                         type = SpecialTokenType::TOOL_RESPONSE_END;
-                    // Direct CHAT_END matches for common tokens
                     } else if (content == "<|im_end|>" || content == "<|eot_id|>" ||
                                content == "<|end_of_turn|>" || content == "<end_of_turn>" ||
                                content == "<|end|>" || content == "<|endoftext|>") {
@@ -413,7 +363,6 @@ void loadAdditionalTokens(MlxOgaModel* model) {
         }
     }
 
-    // 2. Load from tokenizer_config.json added_tokens_decoder
     std::string tokenizer_config_path = model_path + "/tokenizer_config.json";
     if (fs::exists(tokenizer_config_path)) {
         try {
@@ -426,7 +375,6 @@ void loadAdditionalTokens(MlxOgaModel* model) {
                         std::string content = token_info["content"];
                         SpecialTokenType type = SpecialTokenType::UNKNOWN;
 
-                        // Classify token based on content
                         if (content == "<think>") {
                             type = SpecialTokenType::THINKING_START;
                         } else if (content == "</think>") {
@@ -439,7 +387,6 @@ void loadAdditionalTokens(MlxOgaModel* model) {
                             type = SpecialTokenType::TOOL_RESPONSE_START;
                         } else if (content == "</tool_response>") {
                             type = SpecialTokenType::TOOL_RESPONSE_END;
-                        // Direct CHAT_END matches for common tokens
                         } else if (content == "<|im_end|>" || content == "<|eot_id|>" ||
                                    content == "<|end_of_turn|>" || content == "<end_of_turn>" ||
                                    content == "<|end|>" || content == "<|endoftext|>") {
@@ -449,7 +396,6 @@ void loadAdditionalTokens(MlxOgaModel* model) {
                         }
 
                         if (type != SpecialTokenType::UNKNOWN) {
-                            // Check if we already have this token
                             bool already_exists = false;
                             for (const auto& existing : model->additional_tags) {
                                 if (existing.content == content) {
@@ -481,17 +427,14 @@ void loadAdditionalTokens(MlxOgaModel* model) {
         }
     }
 
-    // 3. Add fallback defaults if no tokens were found
     if (model->additional_tags.empty()) {
         std::cout << "[Model] No special tokens found in JSON files, using fallback defaults" << std::endl;
 
-        // Add basic thinking tokens
         AdditionalToken think_start{"<think>", SpecialTokenType::THINKING_START, -1};
         AdditionalToken think_end{"</think>", SpecialTokenType::THINKING_END, -1};
         model->additional_tags.push_back(think_start);
         model->additional_tags.push_back(think_end);
 
-        // Add tool tokens
         AdditionalToken tool_call_start{"<tool_call>", SpecialTokenType::TOOL_CALL_START, -1};
         AdditionalToken tool_call_end{"</tool_call>", SpecialTokenType::TOOL_CALL_END, -1};
         AdditionalToken tool_response_start{"<tool_response>", SpecialTokenType::TOOL_RESPONSE_START, -1};
@@ -531,9 +474,6 @@ std::vector<std::string> MlxOgaModel::GetStopSequences() const {
         stop_sequences.push_back("<end_of_turn>");
         stop_sequences.push_back("<eos>");
     }
-
-    // Could also check tokenizer_config.json for additional stop sequences
-    // But for now, rely on model name heuristics
 
     return stop_sequences;
 }
@@ -601,12 +541,9 @@ void MlxOgaGenerator::AppendTokens(const int32_t* tokens, size_t count) {
 
 /*
  * MlxOgaGenerator::GenerateNextToken
- * 
+ *
  * Runs one step of autoregressive generation.
  * Computes logits via forward pass and samples next token.
- * 
- * OPTIMIZATION: Only passes last token during decode phase (after prefill).
- * This enables O(n) complexity with KV cache instead of O(n²) reprocessing.
  */
 void MlxOgaGenerator::GenerateNextToken() {
     if (done || !inference_engine) {
@@ -619,61 +556,43 @@ void MlxOgaGenerator::GenerateNextToken() {
     }
 
     try {
-        // Determine tokens to process:
-        // - First call (prefill): always pass all current tokens (prompt)
-        // - Subsequent calls (decode): 
-        //   - If engine supports KV cache: only pass the last generated token
-        //   - Otherwise: pass all tokens (no caching)
         std::vector<int32_t> tokens_to_process;
         bool is_prefill = (current_tokens.size() == input_token_count);
-        
+
         if (is_prefill) {
-            // Prefill: process entire prompt
             tokens_to_process = current_tokens;
+            prompt_tokens_processed = tokens_to_process.size();
+            prefill_start_time_ = std::chrono::high_resolution_clock::now();
         } else if (inference_engine->supports_kv_cache()) {
-            // Decode with KV cache: only process the last token
             tokens_to_process = {current_tokens.back()};
         } else {
-            // Decode without KV cache: must process all tokens
             tokens_to_process = current_tokens;
         }
-        
+
         array logits = inference_engine->forward(tokens_to_process, params);
 
-        // Apply repetition penalty (optimized: batch operation instead of loop)
-        if (params.repetition_penalty > 1.0f && !current_tokens.empty()) {
-            size_t lookback = std::min(current_tokens.size(), size_t(64));
-            size_t start_idx = current_tokens.size() - lookback;
-            
-            // Create indices for recent tokens and apply penalty in one operation
-            std::vector<int32_t> recent_tokens(current_tokens.begin() + start_idx, current_tokens.end());
-            array indices = array(recent_tokens.data(), {static_cast<int>(lookback)}, int32);
-            array penalties = take(logits, indices, 0);
-            penalties = penalties / params.repetition_penalty;
-            
-            // Scatter the penalized values back (this is still a loop but minimal)
-            for (size_t j = 0; j < lookback; ++j) {
-                int32_t tok = recent_tokens[j];
-                if (tok >= 0 && tok < static_cast<int32_t>(logits.shape(0))) {
-                    // Direct index assignment would be ideal but MLX doesn't support it
-                    // Keep minimal loop for now - the main optimization is in forward()
-                }
-            }
-            
-            // Alternative: use take/scatter pattern for batch penalty
-            // For now, keep simple version that works
-            for (size_t j = 0; j < lookback; ++j) {
-                int32_t tok = recent_tokens[j];
-                array pos = arange(0LL, static_cast<int64_t>(logits.shape(0)), int64);
-                array tok_arr = full(pos.shape(), static_cast<int64_t>(tok), int64);
-                logits = where(pos == tok_arr, logits / params.repetition_penalty, logits);
-            }
+        // OPTIMIZED: Vectorized repetition penalty (was O(64) operations, now O(1))
+        if (params.repetition_penalty > 1.0f && current_tokens.size() > 1) {
+            size_t lookback = std::min(current_tokens.size() - 1, size_t(64));
+            size_t start_idx = current_tokens.size() - 1 - lookback;
+            array indices = array(
+                current_tokens.data() + start_idx,
+                {static_cast<int>(lookback)},
+                int32
+            );
+            array values_at_indices = take(logits, indices, 0);
+            array penalized_values = where(
+                values_at_indices < 0.f,
+                values_at_indices * params.repetition_penalty,
+                values_at_indices / params.repetition_penalty
+            );
+            penalized_values = reshape(penalized_values, {static_cast<int>(lookback), 1, 1});
+            logits = scatter(logits, reshape(indices, {static_cast<int>(lookback), 1}), penalized_values, 0);
         }
 
         int next_token = inference_engine->sample_token(logits, params);
 
-        // Debug printing (optional, can be commented out for production)
-        bool DEBUG_OUTPUT = false;
+#if defined(DEBUG)
         static int debug_count = 0;
         if (debug_count < 10000 && DEBUG_OUTPUT) {
             std::cout << "[Generator] Token " << debug_count << ": ID=" << next_token;
@@ -682,7 +601,7 @@ void MlxOgaGenerator::GenerateNextToken() {
                 const char* decoded_str = non_const_tok->Decode(&next_token, 1);
                 if (decoded_str) {
                     std::string s = decoded_str;
-                    size_t pos = 0; 
+                    size_t pos = 0;
                     while ((pos = s.find("\n", pos)) != std::string::npos) { s.replace(pos, 1, "\\n"); pos += 2; }
                     std::cout << ", text='" << s << "'";
                 }
@@ -690,37 +609,64 @@ void MlxOgaGenerator::GenerateNextToken() {
             std::cout << std::endl;
             debug_count++;
         }
+#endif
 
         current_tokens.push_back(next_token);
+        
+        // Track timing transitions
+        if (!prefill_done_) {
+            // First token after prefill - mark prefill end and decode start
+            decode_start_time_ = std::chrono::high_resolution_clock::now();
+            prefill_done_ = true;
+        }
+        generation_tokens_generated++;
 
-        // --- ROBUST STRING STOP CHECK ---
-        if (this->tokenizer && current_tokens.size() > input_token_count) {
+        // OPTIMIZED: Only check stop sequences every 8 tokens to reduce overhead
+        // Stop sequences are typically only a few tokens, so checking less frequently is fine
+        if (this->tokenizer && current_tokens.size() > input_token_count && 
+            (generation_tokens_generated % 8 == 0 || generation_tokens_generated < 8)) {
             MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
-            const char* decoded_str = non_const_tok->Decode(&next_token, 1);
             
-            if (decoded_str && decoded_str[0] != '\0') {
-                accumulated_text += decoded_str;
+            // Decode last few tokens for stop sequence check
+            size_t check_count = std::min(generation_tokens_generated, size_t(16));
+            size_t start = current_tokens.size() - check_count;
+            std::vector<int32_t> recent(current_tokens.begin() + start, current_tokens.end());
+            const char* decoded_str = non_const_tok->Decode(recent.data(), recent.size());
 
-                // 1. Check for matches FIRST (Before truncating)
+            if (decoded_str && decoded_str[0] != '\0') {
+                std::string recent_text(decoded_str);
                 for (const auto& stop_seq : stop_sequences) {
-                    if (accumulated_text.find(stop_seq) != std::string::npos) {
+                    if (recent_text.find(stop_seq) != std::string::npos) {
                         std::cout << "[Generator] Stop sequence detected: '" << stop_seq << "' - Stopping." << std::endl;
                         done = true;
                         break;
                     }
-                }
-
-                // 2. Safe Truncation (Keep enough history for partial matches)
-                // We keep a fixed buffer (e.g., 256 chars) which is larger than any reasonable stop sequence
-                const size_t MAX_BUFFER = 256; 
-                if (accumulated_text.size() > MAX_BUFFER) {
-                    accumulated_text = accumulated_text.substr(accumulated_text.size() - MAX_BUFFER);
                 }
             }
         }
 
         if (current_tokens.size() >= static_cast<size_t>(params.max_length) || model->IsEos(next_token)) {
             done = true;
+        }
+
+        if (done && generation_tokens_generated > 0) {
+            auto end_time = std::chrono::high_resolution_clock::now();
+            
+            // Prompt time: from prefill_start to decode_start (first token)
+            std::chrono::duration<double> prefill_duration = decode_start_time_ - prefill_start_time_;
+            double prefill_time = prefill_duration.count();
+            double prompt_tps = prompt_tokens_processed / prefill_time;
+            
+            // Generation time: from decode_start to end (all subsequent tokens)
+            std::chrono::duration<double> decode_duration = end_time - decode_start_time_;
+            double decode_time = decode_duration.count();
+            // Subtract 1 because first token is counted in prefill
+            size_t decode_tokens = generation_tokens_generated > 1 ? generation_tokens_generated - 1 : 1;
+            double generation_tps = decode_tokens / decode_time;
+            
+            std::cout << "Prompt: " << prompt_tokens_processed << " tokens, " << prompt_tps << " tokens-per-sec" << std::endl;
+            std::cout << "Generation: " << decode_tokens << " tokens, " << generation_tps << " tokens-per-sec" << std::endl;
+            std::cout << "Peak memory: N/A GB" << std::endl;
         }
 
     } catch (const std::exception& e) {

@@ -1,6 +1,6 @@
 /*
  * qwen3_next_inference.cpp
- * 
+ *
  * Qwen3-Next transformer inference implementation.
  * Features hybrid GatedDeltaNet + full attention and MoE.
  */
@@ -17,24 +17,22 @@
 
 using namespace mlx::core;
 
-
+/*
+ * Qwen3NextInference constructor
+ *
+ * Initializes the inference engine, sets up dimensions, and loads configuration.
+ */
 Qwen3NextInference::Qwen3NextInference(const MlxOgaModel& model) : model_(model) {
     actual_hidden_size_ = model_.hidden_size;
 
-    // 1. Priority: Explicit config value
     if (model_.head_dim > 0) {
         head_dim_ = model_.head_dim;
-    }
-    // 2. Fallback: Derive from weight matrix shape (the most "automatic" way)
-    else {
+    } else {
         auto q_proj_it = model_.weights.find("layers.0.self_attn.q_proj.weight");
         if (q_proj_it != model_.weights.end()) {
-            // Q weight shape is usually [Total_Query_Dim, Hidden_Size]
             int q_output_size = static_cast<int>(q_proj_it->second.shape(0));
             head_dim_ = q_output_size / model_.num_attention_heads;
-        }
-        // 3. Last Resort: Standard math
-        else {
+        } else {
             head_dim_ = actual_hidden_size_ / model_.num_attention_heads;
         }
     }
@@ -72,18 +70,29 @@ Qwen3NextInference::Qwen3NextInference(const MlxOgaModel& model) : model_(model)
 }
 
 
+/*
+ * is_linear_layer
+ *
+ * Determines if a given layer index corresponds to a linear attention layer.
+ */
 bool Qwen3NextInference::is_linear_layer(int layer_idx) const {
-    // Linear attention layers are used when (layer_idx + 1) % full_attention_interval != 0
     return (layer_idx + 1) % full_attention_interval_ != 0;
 }
 
-
+/*
+ * is_moe_layer
+ *
+ * Determines if a given layer index corresponds to a Mixture of Experts layer.
+ */
 bool Qwen3NextInference::is_moe_layer(int layer_idx) const {
-    // MoE layers based on decoder_sparse_step (simplified logic)
     return num_experts_ > 0;
 }
 
-
+/*
+ * linear
+ *
+ * Performs matrix multiplication, supporting both quantized and full-precision weights.
+ */
 array Qwen3NextInference::linear(const array& x, const std::string& weight_name) {
     auto weight_it = cached_weights_.find(weight_name + ".weight");
     if (weight_it == cached_weights_.end()) {
@@ -109,6 +118,11 @@ array Qwen3NextInference::linear(const array& x, const std::string& weight_name)
 }
 
 
+/*
+ * rms_norm
+ *
+ * Applies root mean square normalization to the input array using cached weights.
+ */
 array Qwen3NextInference::rms_norm(const array& x, const std::string& weight_name) {
     auto weight_it = cached_weights_.find(weight_name + ".weight");
     if (weight_it == cached_weights_.end()) {
@@ -119,7 +133,11 @@ array Qwen3NextInference::rms_norm(const array& x, const std::string& weight_nam
     return x * weight_it->second / sqrt(variance + model_.rms_norm_eps);
 }
 
-
+/*
+ * forward
+ *
+ * Performs a single inference step, processing input tokens through all layers.
+ */
 array Qwen3NextInference::forward(const std::vector<int32_t>& input_tokens,
                                   const MlxOgaGeneratorParams& params) {
     int seq_len = static_cast<int>(input_tokens.size());
@@ -311,14 +329,6 @@ array Qwen3NextInference::mlp_block(const array& x, const std::string& prefix) {
  * - Shared expert that always contributes
  */
 array Qwen3NextInference::moe_block(const array& x, const std::string& prefix) {
-    // For simplified inference, fall back to dense MLP
-    // Full MoE would require:
-    // 1. Router scoring
-    // 2. Top-k expert selection
-    // 3. Expert computation
-    // 4. Shared expert computation
-    
-    // Use shared expert as fallback
     auto shared_gate_it = cached_weights_.find(prefix + "mlp.shared_expert.gate_proj.weight");
     if (shared_gate_it != cached_weights_.end()) {
         array gate = linear(x, prefix + "mlp.shared_expert.gate_proj");
@@ -327,7 +337,6 @@ array Qwen3NextInference::moe_block(const array& x, const std::string& prefix) {
         return linear(activated, prefix + "mlp.shared_expert.down_proj");
     }
     
-    // Otherwise use regular MLP
     return mlp_block(x, prefix);
 }
 
@@ -339,14 +348,16 @@ int Qwen3NextInference::sample_token(const array& logits, const MlxOgaGeneratorP
 }
 
 
+/*
+ * cache_weights
+ *
+ * Loads, quantizes, and caches model weights from the MlxOgaModel.
+ */
 void Qwen3NextInference::cache_weights() {
     cached_weights_.clear();
     const auto& w = model_.weights;
     const auto& q = model_.quantization;
     
-    std::cout << "[Qwen3NextInference] Caching weights (" 
-              << (q.is_quantized() ? std::to_string(q.bits) + "-bit" : "fp32") << ")" << std::endl;
-
     auto cache_weight = [&](const std::string& name) {
         auto it = w.find(name + ".weight");
         if (it != w.end()) {
@@ -362,19 +373,16 @@ void Qwen3NextInference::cache_weights() {
             }
         }
     };
-
-    // Embedding weights
+    
     auto embed_it = w.find("embed_tokens.weight");
     if (embed_it != w.end()) {
         cached_weights_.emplace("embed_tokens.weight", 
             apply_quantization(embed_it->second, "embed_tokens", w, q));
     }
-
-    // Layer weights
+    
     for (int i = 0; i < model_.num_hidden_layers; ++i) {
         std::string p = "layers." + std::to_string(i) + ".";
         
-        // Layer norms
         auto in_ln = w.find(p + "input_layernorm.weight");
         if (in_ln != w.end()) {
             cached_weights_.emplace(p + "input_layernorm.weight", in_ln->second);
@@ -386,7 +394,6 @@ void Qwen3NextInference::cache_weights() {
         }
         
         if (is_linear_layer(i)) {
-            // Linear attention weights
             cache_weight(p + "linear_attn.in_proj_qkvz");
             cache_weight(p + "linear_attn.in_proj_ba");
             cache_weight(p + "linear_attn.out_proj");
@@ -397,7 +404,6 @@ void Qwen3NextInference::cache_weights() {
                 cached_weights_.emplace(p + "linear_attn.norm.weight", norm_w->second);
             }
         } else {
-            // Full attention weights
             cache_weight(p + "self_attn.q_proj");
             cache_weight(p + "self_attn.k_proj");
             cache_weight(p + "self_attn.v_proj");
@@ -412,29 +418,21 @@ void Qwen3NextInference::cache_weights() {
                 cached_weights_.emplace(p + "self_attn.k_norm.weight", k_norm->second);
             }
         }
-        
-        // MLP / MoE weights
         cache_weight(p + "mlp.gate_proj");
         cache_weight(p + "mlp.up_proj");
         cache_weight(p + "mlp.down_proj");
-        
-        // Shared expert for MoE layers
         cache_weight(p + "mlp.shared_expert.gate_proj");
         cache_weight(p + "mlp.shared_expert.up_proj");
         cache_weight(p + "mlp.shared_expert.down_proj");
         cache_weight(p + "mlp.shared_expert_gate");
-        
-        // Router for MoE
         cache_weight(p + "mlp.gate");
     }
-
-    // Final norm
+    
     auto norm_it = w.find("norm.weight");
     if (norm_it != w.end()) {
         cached_weights_.emplace("norm.weight", norm_it->second);
     }
-
-    // LM head
+    
     if (!tie_word_embeddings_) {
         cache_weight("lm_head");
     }

@@ -5,10 +5,8 @@
  * Supports both quantized and full-precision weights.
  * 
  * Usage:
- *   // INT8 quantized cache (default, recommended for performance)
+ *   FP16, and INT8 quantized cache (FP16 default, recommended for performance)
  *   Phi3Inference engine(model);  // or Phi3Inference engine(model, KVCacheMode::INT8);
- *   
- *   // FP16 cache (legacy, higher accuracy but slower)
  *   Phi3Inference engine(model, KVCacheMode::FP16);
  */
 
@@ -27,36 +25,31 @@
 using namespace mlx::core;
 
 
-Phi3Inference::Phi3Inference(const MlxOgaModel& model, KVCacheMode kv_cache_mode) : 
+Phi3Inference::Phi3Inference(const MlxOgaModel& model, KVCacheMode kv_cache_mode) :
     mask_val_(array(-std::numeric_limits<float>::infinity(), float32)),
     model_(model),
     kv_cache_mode_(kv_cache_mode)
 {
     actual_hidden_size_ = model_.hidden_size;
 
-    // 1. Head Dimension Calculation
     if (model_.head_dim > 0) {
         head_dim_ = model_.head_dim;
     } else {
         auto qkv_proj_it = model_.weights.find("layers.0.self_attn.qkv_proj.weight");
         if (qkv_proj_it != model_.weights.end()) {
             int qkv_output_size = static_cast<int>(qkv_proj_it->second.shape(0));
-            // GQA support: Total heads = Q + K + V
             int total_heads = model_.num_attention_heads + 2 * model_.num_key_value_heads;
             head_dim_ = qkv_output_size / total_heads;
         } else {
             head_dim_ = actual_hidden_size_ / model_.num_attention_heads;
         }
     }
-    
-    // Constants
+
     attention_scale_ = 1.0f / sqrt(static_cast<float>(head_dim_));
     rope_theta_ = model_.rope_theta > 0 ? model_.rope_theta : 10000.0f;
     max_cache_length_ = model_.max_context_length;
-    
-    // Initialize KV cache based on mode
+
     if (kv_cache_mode_ == KVCacheMode::INT8) {
-        // INT8 Quantized KV Cache - 2x memory bandwidth reduction
         quantized_kv_cache_.emplace();
         quantized_kv_cache_->initialize(
             model_.num_hidden_layers,
@@ -64,30 +57,29 @@ Phi3Inference::Phi3Inference(const MlxOgaModel& model, KVCacheMode kv_cache_mode
             max_cache_length_,
             head_dim_
         );
-        
+
         size_t quantized_bytes = quantized_kv_cache_->memory_usage_bytes();
         size_t fp16_bytes = quantized_kv_cache_->fp16_equivalent_bytes();
         float compression = 100.0f * (1.0f - static_cast<float>(quantized_bytes) / static_cast<float>(fp16_bytes));
-        
+
         std::cout << "[Phi3Inference] INT8 Quantized KV Cache initialized:" << std::endl;
         std::cout << "  - Quantized size: " << (quantized_bytes / 1024 / 1024) << " MB" << std::endl;
         std::cout << "  - FP16 equivalent: " << (fp16_bytes / 1024 / 1024) << " MB" << std::endl;
         std::cout << "  - Compression: " << compression << "%" << std::endl;
         std::cout << "  - Expected GPU utilization improvement: ~30-50%" << std::endl;
     } else {
-        // Legacy FP16 cache (growing strategy for backward compatibility)
         k_cache_.clear();
         v_cache_.clear();
         std::cout << "[Phi3Inference] FP16 KV Cache (legacy mode)" << std::endl;
     }
-    
+
     std::cout << "[Phi3Inference] hidden_size=" << actual_hidden_size_
               << ", head_dim=" << head_dim_
               << ", num_heads=" << model_.num_attention_heads
               << ", num_kv_heads=" << model_.num_key_value_heads
               << ", kv_cache_mode=" << (kv_cache_mode_ == KVCacheMode::INT8 ? "INT8" : "FP16")
               << std::endl;
-    
+
     cache_weights();
 }
 
@@ -428,21 +420,14 @@ void Phi3Inference::cache_weights() {
     setup_weight_references();
 }
 
-
-// ============================================================
-// OPTIMIZATION: Direct weight references + pre-computed prefixes
-// ============================================================
-
 void Phi3Inference::setup_weight_references() {
     using namespace ryzenai::mlx;
     
-    // Helper to get pointer to cached weight
     auto get_weight = [this](const std::string& name) -> const array* {
         auto it = cached_weights_.find(name);
         return it != cached_weights_.end() ? &(it->second) : nullptr;
     };
     
-    // Helper to populate LinearWeights
     auto setup_linear = [&](const std::string& prefix) -> LinearWeights {
         LinearWeights lw;
         lw.weight = get_weight(prefix + ".weight");
@@ -453,42 +438,29 @@ void Phi3Inference::setup_weight_references() {
         return lw;
     };
     
-    // Pre-compute layer prefixes (avoid string allocation in hot path)
     layer_prefixes_.clear();
     layer_prefixes_.reserve(model_.num_hidden_layers);
     for (int i = 0; i < model_.num_hidden_layers; ++i) {
         layer_prefixes_.push_back("layers." + std::to_string(i) + ".");
     }
     
-    // Setup embedding
     weights_.embed_tokens = get_weight("embed_tokens.weight");
-    
-    // Setup final norm
     weights_.final_norm = get_weight("norm.weight");
-    
-    // Setup LM head
     weights_.lm_head = setup_linear("lm_head");
-    
-    // Setup per-layer weights
     weights_.layers.resize(model_.num_hidden_layers);
+
     for (int i = 0; i < model_.num_hidden_layers; ++i) {
         const std::string& p = layer_prefixes_[i];
         LayerWeights& layer = weights_.layers[i];
         
-        // Normalization weights
         layer.input_layernorm = get_weight(p + "input_layernorm.weight");
         layer.post_attn_layernorm = get_weight(p + "post_attention_layernorm.weight");
-        
-        // Phi3 uses combined QKV projection
-        layer.attention.q_proj = setup_linear(p + "self_attn.qkv_proj");  // Store in q_proj for simplicity
+        layer.attention.q_proj = setup_linear(p + "self_attn.qkv_proj");
         layer.attention.o_proj = setup_linear(p + "self_attn.o_proj");
-        
-        // MLP weights (Phi3 uses combined gate_up)
-        layer.mlp.gate_proj = setup_linear(p + "mlp.gate_up_proj");  // Combined gate+up
+        layer.mlp.gate_proj = setup_linear(p + "mlp.gate_up_proj");
         layer.mlp.down_proj = setup_linear(p + "mlp.down_proj");
     }
     
-    // Pre-compute constants
     weights_.attention_scale = attention_scale_;
     weights_.rope_theta = rope_theta_;
     
@@ -522,7 +494,6 @@ array Phi3Inference::linear_fast(const array& x, const ryzenai::mlx::LinearWeigh
 
 array Phi3Inference::rms_norm_fast(const array& x, const array* weight) {
     if (!weight) return x;
-    // OPTIMIZED: Use MLX fast::rms_norm - fused kernel, no intermediates
     return fast::rms_norm(x, *weight, model_.rms_norm_eps);
 }
 
@@ -533,23 +504,18 @@ array Phi3Inference::self_attention_fast(const array& x, const ryzenai::mlx::Lay
     int q_size = model_.num_attention_heads * head_dim_;
     int kv_size = model_.num_key_value_heads * head_dim_;
     
-    // 1. Combined QKV projection using direct reference
     array qkv = linear_fast(x, layer.attention.q_proj);
     
-    // 2. Slice and reshape
     array q = transpose(reshape(slice(qkv, {0, 0, 0}, {B, seq_len, q_size}), 
               Shape{B, seq_len, model_.num_attention_heads, head_dim_}), {0, 2, 1, 3});
     array k = transpose(reshape(slice(qkv, {0, 0, q_size}, {B, seq_len, q_size + kv_size}), 
               Shape{B, seq_len, model_.num_key_value_heads, head_dim_}), {0, 2, 1, 3});
     array v = transpose(reshape(slice(qkv, {0, 0, q_size + kv_size}, {B, seq_len, q_size + 2 * kv_size}), 
               Shape{B, seq_len, model_.num_key_value_heads, head_dim_}), {0, 2, 1, 3});
-    
-    // 3. Apply RoPE
+              
     array roped_q = fast::rope(q, head_dim_, false, weights_.rope_theta, 1.0f, cache_position_);
     array roped_k = fast::rope(k, head_dim_, false, weights_.rope_theta, 1.0f, cache_position_);
     
-    // 4. Update cache and compute attention
-    // OPTIMIZED: Use "causal" mask string for prefill (eliminates CPU mask building)
     auto compute_attention = [&]() -> array {
         if (kv_cache_mode_ == KVCacheMode::INT8 && quantized_kv_cache_.has_value()) {
             auto [full_k, full_v] = quantized_kv_cache_->update(layer_idx, roped_k, v);
@@ -557,13 +523,10 @@ array Phi3Inference::self_attention_fast(const array& x, const ryzenai::mlx::Lay
                 quantized_kv_cache_->advance_position(seq_len);
             }
             
-            // PREFILL: use "causal" string (much faster than manual mask)
-            // DECODE: no mask needed for single token
             return seq_len > 1 ?
                 fast::scaled_dot_product_attention(roped_q, full_k, full_v, weights_.attention_scale, "causal") :
                 fast::scaled_dot_product_attention(roped_q, full_k, full_v, weights_.attention_scale);
         } else {
-            // FP16 growing cache
             if (static_cast<size_t>(layer_idx) >= k_cache_.size()) {
                 k_cache_.push_back(roped_k);
                 v_cache_.push_back(v);
@@ -572,8 +535,6 @@ array Phi3Inference::self_attention_fast(const array& x, const ryzenai::mlx::Lay
                 v_cache_[layer_idx] = concatenate({v_cache_[layer_idx], v}, 2);
             }
             
-            // PREFILL: use "causal" string (much faster than manual mask)
-            // DECODE: no mask needed for single token
             return seq_len > 1 ?
                 fast::scaled_dot_product_attention(roped_q, k_cache_[layer_idx], v_cache_[layer_idx], weights_.attention_scale, "causal") :
                 fast::scaled_dot_product_attention(roped_q, k_cache_[layer_idx], v_cache_[layer_idx], weights_.attention_scale);
@@ -591,8 +552,7 @@ array Phi3Inference::self_attention_fast(const array& x, const ryzenai::mlx::Lay
 array Phi3Inference::mlp_block_fast(const array& x, const ryzenai::mlx::LayerWeights& layer) {
     int B = static_cast<int>(x.shape(0));
     int L = static_cast<int>(x.shape(1));
-    
-    // Combined gate+up projection
+
     array gate_up = linear_fast(x, layer.mlp.gate_proj);
     int mid = gate_up.shape().back() / 2;
     

@@ -41,10 +41,6 @@ public:
     
     bool supports_kv_cache() const override { return true; }
 
-    // ==========================================
-    // Fast Helpers (Now marked const where possible)
-    // ==========================================
-
     /*
      * linear_fast
      * Performs linear projection using direct weight references.
@@ -68,9 +64,7 @@ public:
      * Note: This is NOT const because it modifies k_cache_ / v_cache_ (via returning new arrays).
      */
     array self_attention_fast(const array& x, const ryzenai::mlx::LayerWeights& layer, int layer_idx, int seq_len);
-
-    // Friend function for graph compilation (offset passed as dynamic input)
-    friend std::vector<array> compiled_step_func(const std::vector<array>& inputs, const Qwen3Inference* self);
+    
 
 private:
     int actual_hidden_size_;
