@@ -28,12 +28,16 @@ using ::mlx::core::float32;
 using ::mlx::core::float16;
 using ::mlx::core::zeros;
 using ::mlx::core::slice;
+using ::mlx::core::slice_update;
 using ::mlx::core::concatenate;
 using ::mlx::core::eval;
 using ::mlx::core::max;
 using ::mlx::core::abs;
 using ::mlx::core::round;
 using ::mlx::core::astype;
+using ::mlx::core::arange;
+using ::mlx::core::scatter;
+using ::mlx::core::expand_dims;
 
 /*
  * KVCache
@@ -301,6 +305,125 @@ private:
     
     std::vector<array> k_scales_;
     std::vector<array> v_scales_;
+};
+
+/*
+ * HighPerformanceKVCache
+ * 
+ * Ultra-fast KV cache with O(1) updates using pre-allocated buffers.
+ * Uses slice_update for in-place writes instead of concatenate.
+ * 
+ * This is critical for achieving 150+ TPS.
+ */
+class HighPerformanceKVCache {
+public:
+    std::vector<array> k_cache_;
+    std::vector<array> v_cache_;
+    
+    HighPerformanceKVCache() 
+        : initialized_(false), position_(0), max_length_(0), num_layers_(0), num_kv_heads_(0), head_dim_(0) {}
+    
+    /*
+     * initialize
+     * Pre-allocates FULL KV cache buffers for all layers upfront.
+     * This enables O(1) slice_update writes.
+     */
+    void initialize(int num_layers, int num_kv_heads, int max_length, int head_dim) {
+        num_layers_ = num_layers;
+        num_kv_heads_ = num_kv_heads;
+        max_length_ = max_length;
+        head_dim_ = head_dim;
+        position_ = 0;
+        
+        k_cache_.clear();
+        v_cache_.clear();
+        k_cache_.reserve(num_layers);
+        v_cache_.reserve(num_layers);
+        
+        // Pre-allocate FULL buffers for each layer
+        for (int i = 0; i < num_layers; ++i) {
+            k_cache_.push_back(zeros({1, num_kv_heads, max_length, head_dim}, float16));
+            v_cache_.push_back(zeros({1, num_kv_heads, max_length, head_dim}, float16));
+        }
+        
+        // Force materialization
+        eval(k_cache_);
+        eval(v_cache_);
+        initialized_ = true;
+    }
+    
+    void clear() {
+        position_ = 0;
+        // Don't reallocate - just reset position
+    }
+    
+    /*
+     * update
+     * O(1) update using slice_update - no concatenation!
+     * Returns a view of the valid portion of the cache.
+     */
+    std::pair<array, array> update(int layer_idx, const array& new_k, const array& new_v) {
+        int seq_len = static_cast<int>(new_k.shape(2));
+        int new_pos = position_ + seq_len;
+        
+        // Clamp to max_length
+        if (new_pos > max_length_) {
+            // Sliding window: shift cache and insert at end
+            // This is more complex - for now, just cap at max
+            new_pos = max_length_;
+        }
+        
+        // O(1) in-place update using slice_update
+        // Write new_k/new_v at position [0:B, 0:H, position_:new_pos, 0:D]
+        k_cache_[layer_idx] = slice_update(
+            k_cache_[layer_idx], 
+            new_k, 
+            {0, 0, position_, 0},  // start
+            {1, num_kv_heads_, new_pos, head_dim_}  // stop
+        );
+        
+        v_cache_[layer_idx] = slice_update(
+            v_cache_[layer_idx], 
+            new_v, 
+            {0, 0, position_, 0},
+            {1, num_kv_heads_, new_pos, head_dim_}
+        );
+        
+        // Return slice of valid cache [0:new_pos]
+        array full_k = slice(k_cache_[layer_idx], {0, 0, 0, 0}, {1, num_kv_heads_, new_pos, head_dim_});
+        array full_v = slice(v_cache_[layer_idx], {0, 0, 0, 0}, {1, num_kv_heads_, new_pos, head_dim_});
+        
+        return {full_k, full_v};
+    }
+    
+    void advance_position(int seq_len) {
+        position_ += seq_len;
+        if (position_ > max_length_) {
+            position_ = max_length_;
+        }
+    }
+    
+    bool is_initialized() const { return initialized_; }
+    int position() const { return position_; }
+    int max_length() const { return max_length_; }
+    int num_layers() const { return num_layers_; }
+    int num_kv_heads() const { return num_kv_heads_; }
+    int head_dim() const { return head_dim_; }
+    
+    size_t memory_usage_bytes() const {
+        size_t total = 0;
+        for (const auto& a : k_cache_) total += a.nbytes();
+        for (const auto& a : v_cache_) total += a.nbytes();
+        return total;
+    }
+
+private:
+    bool initialized_;
+    int position_;
+    int max_length_;
+    int num_layers_;
+    int num_kv_heads_;
+    int head_dim_;
 };
 
 } // namespace ryzenai::mlx

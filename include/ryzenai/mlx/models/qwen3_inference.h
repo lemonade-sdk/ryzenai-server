@@ -102,7 +102,9 @@ private:
     int max_cache_length_;
 
     ryzenai::KVCacheMode kv_cache_mode_;
-    ryzenai::mlx::KVCache kv_cache_;
+    ryzenai::mlx::HighPerformanceKVCache hp_kv_cache_;  // High-performance O(1) cache
+    ryzenai::mlx::KVCache kv_cache_;  // Legacy cache (fallback)
+    bool use_hp_cache_ = true;  // Use high-performance cache by default
 
     void cache_weights();
     void setup_weight_references();
