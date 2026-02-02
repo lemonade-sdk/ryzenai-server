@@ -1,5 +1,5 @@
 {
-  "model": "Qwen3-1.7B-4bit",
+  "model": "Qwen3-4B-MLX-4bitl",
   "messages": [
     {
       "role": "system",

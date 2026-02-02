@@ -7,9 +7,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(BUILD_RYZEN "Build with Ryzen AI support" ON)
-if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(APPLE)
     option(BUILD_MLX "Build with MLX support" ON)
-    option(MLX_CUDA "Enable CUDA support for MLX" ON)
+    option(MLX_CUDA "Enable CUDA support for MLX" OFF)
+    option(MLX_ROCM "Enable ROCm support for MLX" OFF)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    option(BUILD_MLX "Build with MLX support" ON)
+    option(MLX_CUDA "Enable CUDA support for MLX" OFF)
+    option(MLX_ROCM "Enable ROCm support for MLX" ON)
 else()
     option(BUILD_MLX "Build with MLX support" OFF)
 endif()
@@ -24,6 +29,12 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # Find dependencies
 find_package(Threads REQUIRED)
+
+# Find BLAS and LAPACK for MLX
+if(BUILD_MLX)
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+endif()
 
 # Ryzen AI dependencies
 if(BUILD_RYZEN)
@@ -82,8 +93,8 @@ if(BUILD_MLX)
     message(STATUS "Fetching MLX...")
     FetchContent_Declare(
         mlx
-        GIT_REPOSITORY https://github.com/ml-explore/mlx.git
-        GIT_TAG main
+        GIT_REPOSITORY https://github.com/NripeshN/mlx.git
+        GIT_TAG rocm-support
         GIT_SHALLOW FALSE      # <--- Faster download
         GIT_PROGRESS TRUE     # <--- SHOWS YOU THE DOWNLOAD BAR
     )
@@ -92,14 +103,26 @@ if(BUILD_MLX)
     set(MLX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(MLX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
     set(MLX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    # Set CUDA support based on platform and option
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        set(MLX_BUILD_CUDA ${MLX_CUDA} CACHE BOOL "" FORCE)
+    # ROCm support
+    if(MLX_ROCM)
+        set(HIP_PLATFORM "amd" CACHE STRING "" FORCE)
+        set(MLX_BUILD_ROCM ON CACHE BOOL "" FORCE)
+        set(CMAKE_PREFIX_PATH "/opt/rocm" CACHE PATH "" FORCE)
+        set(MLX_ROCM_ARCHITECTURES "gfx1151;" CACHE STRING "" FORCE)
+        # Disable CUDA when ROCm is enabled
+        set(MLX_BUILD_CUDA OFF CACHE BOOL "" FORCE)
     else()
+        # Disable CUDA for ROCM support branch
         set(MLX_BUILD_CUDA OFF CACHE BOOL "" FORCE)
     endif()
 
     FetchContent_MakeAvailable(mlx)
+    # Override HIP architectures after MLX configuration
+    if(MLX_ROCM)
+        set(MLX_ROCM_ARCHITECTURES "gfx1151;" CACHE STRING "" FORCE)
+        # Add MLX source include path for HIP compilation
+        set(CMAKE_HIP_FLAGS "-I${mlx_SOURCE_DIR}" CACHE STRING "" FORCE)
+    endif()
     # Set include directories for MLX
     set(MLX_INCLUDE_DIRS ${mlx_SOURCE_DIR}/include)
 endif()
@@ -154,6 +177,7 @@ if(BUILD_MLX)
         src/mlx/inference_factory.cpp
         src/mlx/tokenizer.cpp
         src/mlx/moe.cpp
+        src/mlx/gpu_utils.cpp
     )
 endif()
 
@@ -239,6 +263,9 @@ if(BUILD_MLX)
     if(MLX_CUDA)
         target_compile_definitions(ryzenai-server PRIVATE MLX_CUDA_ON)
     endif()
+    if(MLX_ROCM)
+        target_compile_definitions(ryzenai-server PRIVATE MLX_ROCM_ON)
+    endif()
 endif()
 
 # Windows-specific settings
@@ -320,6 +347,11 @@ else()
 endif()
 if(BUILD_MLX)
     message(STATUS "  MLX:               ENABLED")
+    if(MLX_ROCM)
+        message(STATUS "  MLX ROCm:          ENABLED (${CMAKE_HIP_ARCHITECTURES})")
+    else()
+        message(STATUS "  MLX ROCm:          DISABLED")
+    endif()
 else()
     message(STATUS "  MLX:               DISABLED")
 endif()

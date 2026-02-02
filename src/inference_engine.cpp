@@ -10,6 +10,11 @@
 
 #ifdef MLX_ON
 #include "ryzenai/backend/mlx_backend.h"
+#include "ryzenai/mlx/gpu_utils.h"
+#include <mlx/backend/gpu/available.h>
+#include <mlx/backend/metal/metal.h>
+#include <mlx/backend/cuda/cuda.h>
+#include <mlx/backend/rocm/rocm.h>
 #endif
 
 #ifdef RYZENAI_ON
@@ -17,10 +22,7 @@
 #endif
 
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
-#include <algorithm>
 #include <cctype>
 #include <json.hpp>
 
@@ -42,7 +44,10 @@ const GenerationParams InferenceEngine::default_params_;
  * @param opt Optimization settings including context size, KV cache, and repetition penalty parameters.
  */
 InferenceEngine::InferenceEngine(const OptimizationSettings& opt)
-    : opt_settings_(opt) {
+    : opt_settings_(opt),
+      has_metal_available_(false),
+      has_rocm_gpu_available_(false),
+      has_cuda_gpu_available_(false) {
     
     std::cout << "[InferenceEngine] Initializing multi-backend engine" << std::endl;
     std::cout << "[InferenceEngine] Optimization settings:" << std::endl;
@@ -51,17 +56,97 @@ InferenceEngine::InferenceEngine(const OptimizationSettings& opt)
     std::cout << "  - KV cache: " << (opt.kv_cache ? "enabled" : "disabled") << std::endl;
     std::cout << "  - Prefill chunk: " << opt.prefill_chunk << " tokens" << std::endl;
     
-    // Register available backends
+    // Register available backends (only if hardware is available)
 #ifdef MLX_ON
-    BackendRegistry::instance().registerBackend(
-        BackendType::MLX_METAL,
-        [](const std::string& model_path) -> std::unique_ptr<IBackend> {
-            auto backend = std::make_unique<MlxBackend>(BackendType::MLX_METAL);
-            backend->loadModel(model_path);
-            return backend;
+    // Discover available GPUs using GpuUtils
+    auto available_gpus = ryzenai::mlx::GpuUtils::discoverAvailableGpus();
+
+    // Check which backend types are supported by available hardware
+    has_metal_available_ = ::mlx::core::metal::is_available();
+    has_rocm_gpu_available_ = ryzenai::mlx::GpuUtils::findFirstGpuOfType(BackendType::MLX_ROCM) >= 0;
+    has_cuda_gpu_available_ = ryzenai::mlx::GpuUtils::findFirstGpuOfType(BackendType::MLX_CUDA) >= 0;
+
+    int registered_mlx_backends = 0;
+
+    // Register Metal backend if available
+    if (has_metal_available_) {
+        BackendRegistry::instance().registerBackend(
+            BackendType::MLX_METAL,
+            [](const std::string& model_path) -> std::unique_ptr<IBackend> {
+                auto backend = std::make_unique<MlxBackend>(BackendType::MLX_METAL);
+                backend->loadModel(model_path);
+                return backend;
+            }
+        );
+        std::cout << "[InferenceEngine] Registered MLX Metal backend" << std::endl;
+        registered_mlx_backends++;
+    }
+
+    // Register ROCm backend if ROCm GPUs are available
+    if (has_rocm_gpu_available_) {
+        std::cout << "[InferenceEngine] Available ROCm GPUs:" << std::endl;
+        for (const auto& gpu : available_gpus) {
+            if (gpu.type == BackendType::MLX_ROCM) {
+                std::cout << "  - GPU " << gpu.index << ": " << gpu.name;
+                auto arch_it = gpu.properties.find("architecture");
+                if (arch_it != gpu.properties.end()) {
+                    std::cout << " (" << std::get<std::string>(arch_it->second) << ")";
+                }
+                std::cout << std::endl;
+            }
         }
-    );
-    std::cout << "[InferenceEngine] Registered MLX Metal backend" << std::endl;
+
+        BackendRegistry::instance().registerBackend(
+            BackendType::MLX_ROCM,
+            [](const std::string& model_path) -> std::unique_ptr<IBackend> {
+                auto backend = std::make_unique<MlxBackend>(BackendType::MLX_ROCM);
+                backend->loadModel(model_path);
+                return backend;
+            }
+        );
+        std::cout << "[InferenceEngine] Registered MLX ROCm backend" << std::endl;
+        registered_mlx_backends++;
+    }
+
+    // Register CUDA backend if CUDA GPUs are available
+    if (has_cuda_gpu_available_) {
+        std::cout << "[InferenceEngine] Available CUDA GPUs:" << std::endl;
+        for (const auto& gpu : available_gpus) {
+            if (gpu.type == BackendType::MLX_CUDA) {
+                std::cout << "  - GPU " << gpu.index << ": " << gpu.name;
+                auto arch_it = gpu.properties.find("architecture");
+                if (arch_it != gpu.properties.end()) {
+                    std::cout << " (" << std::get<std::string>(arch_it->second) << ")";
+                }
+                auto cc_it = gpu.properties.find("compute_capability_major");
+                if (cc_it != gpu.properties.end()) {
+                    auto cc_minor_it = gpu.properties.find("compute_capability_minor");
+                    if (cc_minor_it != gpu.properties.end()) {
+                        std::cout << " (CC " << std::get<size_t>(cc_it->second)
+                                  << "." << std::get<size_t>(cc_minor_it->second) << ")";
+                    }
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        BackendRegistry::instance().registerBackend(
+            BackendType::MLX_CUDA,
+            [](const std::string& model_path) -> std::unique_ptr<IBackend> {
+                auto backend = std::make_unique<MlxBackend>(BackendType::MLX_CUDA);
+                backend->loadModel(model_path);
+                return backend;
+            }
+        );
+        std::cout << "[InferenceEngine] Registered MLX CUDA backend" << std::endl;
+        registered_mlx_backends++;
+    }
+
+    if (registered_mlx_backends == 0) {
+        std::cout << "[InferenceEngine] No MLX backends available (no compatible hardware found)" << std::endl;
+    } else {
+        std::cout << "[InferenceEngine] Registered " << registered_mlx_backends << " MLX backend(s)" << std::endl;
+    }
 #endif
 
 #ifdef RYZENAI_ON
@@ -204,14 +289,57 @@ std::string InferenceEngine::loadModel(const std::string& model_path, BackendTyp
     BackendType actual_type = backend_type;
     if (actual_type == BackendType::AUTO) {
         actual_type = BackendRegistry::instance().detectBestBackend();
-        std::cout << "[InferenceEngine] Auto-detected backend: " 
+        std::cout << "[InferenceEngine] Auto-detected backend: "
                   << backendTypeToString(actual_type) << std::endl;
     }
-    
+
+    // Check device availability based on backend type (using cached availability)
+    switch (actual_type) {
+        case BackendType::MLX_METAL:
+            if (!has_metal_available_) {
+                throw std::runtime_error("Metal device not available. Metal backend requires macOS with Apple Silicon or compatible hardware.");
+            }
+            std::cout << "[InferenceEngine] Metal device is available" << std::endl;
+            break;
+
+        case BackendType::MLX_ROCM:
+            if (!has_rocm_gpu_available_) {
+                throw std::runtime_error("ROCm-compatible GPU not available. Please check that ROCm drivers are properly installed and a compatible AMD GPU is present.");
+            }
+            std::cout << "[InferenceEngine] ROCm GPU is available" << std::endl;
+            break;
+
+        case BackendType::MLX_CUDA:
+            if (!has_cuda_gpu_available_) {
+                throw std::runtime_error("CUDA-compatible GPU not available. Please check that CUDA drivers are properly installed and a compatible NVIDIA GPU is present.");
+            }
+            std::cout << "[InferenceEngine] CUDA GPU is available" << std::endl;
+            break;
+
+        case BackendType::ONNX_CPU:
+            // CPU is always available
+            std::cout << "[InferenceEngine] CPU backend selected (always available)" << std::endl;
+            break;
+
+        case BackendType::ONNX_RYZENAI:
+            // TODO: Add Ryzen AI NPU availability check
+            std::cout << "[InferenceEngine] Ryzen AI NPU backend selected" << std::endl;
+            break;
+
+        case BackendType::ONNX_DIRECTML:
+            // TODO: Add DirectML availability check
+            std::cout << "[InferenceEngine] DirectML backend selected" << std::endl;
+            break;
+
+        default:
+            // For AUTO and unknown types, assume available
+            break;
+    }
+
     // Create backend and load model
-    std::cout << "[InferenceEngine] Loading model: " << model_name 
+    std::cout << "[InferenceEngine] Loading model: " << model_name
               << " on backend: " << backendTypeToString(actual_type) << std::endl;
-    
+
     auto backend = BackendRegistry::instance().create(actual_type, resolved_path);
     
     // Apply context size from optimization settings

@@ -7,7 +7,9 @@
 #include <ryzenai/backend/mlx_backend.h>
 #include <ryzenai/inference_engine.h>
 #include <ryzenai/mlx/mlx_oga.h>
+#include <ryzenai/mlx/gpu_utils.h>
 #include <mlx/device.h>
+#include <mlx/backend/gpu/available.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -30,9 +32,12 @@ MlxBackend::MlxBackend(BackendType type) : type_(type) {
 
 void MlxBackend::loadModel(const std::string& model_path) {
     model_path_ = resolveModelPath(model_path);
-    
+
     std::cout << "[MlxBackend] Loading model from: " << model_path_ << std::endl;
-    
+
+    // Set the appropriate MLX device based on backend type
+    ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(type_);
+
     // Create model using factory method
     model_ = MlxOgaModel::Create(model_path_.c_str());
     if (!model_) {
@@ -193,7 +198,7 @@ std::string MlxBackend::complete(const std::string& prompt, const GenerationPara
     
     try {
         // Query GPU device info for max buffer length
-        auto device_info = mlx::core::device_info(mlx::core::Device(mlx::core::Device::gpu, 0));
+        auto device_info = ::mlx::core::device_info(::mlx::core::Device(::mlx::core::Device::gpu, 0));
         auto it = device_info.find("max_buffer_length");
         if (it != device_info.end()) {
             size_t max_buffer = std::get<size_t>(it->second);
@@ -364,7 +369,7 @@ void MlxBackend::streamComplete(const std::string& prompt, const GenerationParam
     
     try {
         // Query GPU device info for max buffer length
-        auto device_info = mlx::core::device_info(mlx::core::Device(mlx::core::Device::gpu, 0));
+        auto device_info = ::mlx::core::device_info(::mlx::core::Device(::mlx::core::Device::gpu, 0));
         auto it = device_info.find("max_buffer_length");
         if (it != device_info.end()) {
             size_t max_buffer = std::get<size_t>(it->second);
