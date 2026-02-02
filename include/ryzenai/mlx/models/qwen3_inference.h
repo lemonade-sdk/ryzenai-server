@@ -1,11 +1,13 @@
 /*
  * qwen3_inference.h
- * * Qwen3 model inference engine for MLX backend.
+ *
+ * Qwen3 model inference engine for MLX backend.
  * Optimized for Apple Silicon (Metal) using MLX.
- * * Features:
+ *
+ * Features:
  * - Graph Compilation for Decoding Step (High TPS on M-series chips)
  * - Fused QKV Projections
- * - Pre-allocated KV Cache
+ * - Pre-allocated KV Cache (FP16 or INT8 quantized)
  * - Direct Weight References (Zero-overhead lookups)
  */
 
@@ -15,18 +17,20 @@
 #include "ryzenai/mlx/model.h"
 #include "ryzenai/mlx/generator.h"
 #include "ryzenai/mlx/layer_weights.h"
+#include "ryzenai/mlx/kv_cache.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
 #include <optional>
 #include <functional>
 
+
 class Qwen3Inference : public BaseInferenceEngine {
 public:
     const MlxOgaModel& model_;
 
 public:
-    Qwen3Inference(const MlxOgaModel& model);
+    Qwen3Inference(const MlxOgaModel& model, ryzenai::KVCacheMode kv_cache_mode = ryzenai::KVCacheMode::FP16);
 
     array forward(const std::vector<int32_t>& input_tokens,
                   const MlxOgaGeneratorParams& params) override;
@@ -38,39 +42,37 @@ public:
     bool supports_kv_cache() const override { return true; }
 
     // ==========================================
-    // Fast Helpers (Now marked const)
+    // Fast Helpers (Now marked const where possible)
     // ==========================================
 
     /*
      * linear_fast
      * Performs linear projection using direct weight references.
      */
-    array linear_fast(const array& x, const ryzenai::mlx::LinearWeights& w) const; // <--- Added const
+    array linear_fast(const array& x, const ryzenai::mlx::LinearWeights& w) const;
 
     /*
      * rms_norm_fast
      * Applies RMS normalization using fused Metal kernel.
      */
-    array rms_norm_fast(const array& x, const array* weight) const; // <--- Added const
+    array rms_norm_fast(const array& x, const array* weight) const;
 
     /*
      * mlp_block_fast
      * SwiGLU MLP Block: (SiLU(Gate) * Up) -> Down
      */
-    array mlp_block_fast(const array& x, const ryzenai::mlx::MLPWeights& mlp) const; // <--- Added const
+    array mlp_block_fast(const array& x, const ryzenai::mlx::MLPWeights& mlp) const;
     
     /*
      * self_attention_fast
-     * Note: This is NOT const because it modifies k_cache_ / v_cache_ in place.
+     * Note: This is NOT const because it modifies k_cache_ / v_cache_ (via returning new arrays).
      */
-    array self_attention_fast(const array& x, const ryzenai::mlx::LayerWeights& layer,
-                              int layer_idx, const std::string& mask_type);
+    array self_attention_fast(const array& x, const ryzenai::mlx::LayerWeights& layer, int layer_idx, int seq_len);
 
     // Friend function for graph compilation (offset passed as dynamic input)
     friend std::vector<array> compiled_step_func(const std::vector<array>& inputs, const Qwen3Inference* self);
 
 private:
-    // ... [Rest of private members remain unchanged] ...
     int actual_hidden_size_;
     int head_dim_;
     bool tie_word_embeddings_;
@@ -98,6 +100,9 @@ private:
     int cache_position_;
     int step_;
     int max_cache_length_;
+
+    ryzenai::KVCacheMode kv_cache_mode_;
+    ryzenai::mlx::KVCache kv_cache_;
 
     void cache_weights();
     void setup_weight_references();
