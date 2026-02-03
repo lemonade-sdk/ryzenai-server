@@ -130,8 +130,8 @@ void OpenBrowser(const std::string& url) {
 
 #else
 
-#ifdef __APPLE__
-std::string GetNPUDriverVersion() { return ""; }  // Return empty on macOS to skip version check
+#if defined(__APPLE__) || defined(__linux__)
+std::string GetNPUDriverVersion() { return ""; }  // Return empty on macOS and Linux to skip NPU version check
 #else
 std::string GetNPUDriverVersion() { return "0.0.0.0"; }
 #endif

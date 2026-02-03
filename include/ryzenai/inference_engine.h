@@ -28,7 +28,7 @@ struct OptimizationSettings {
     int prefill_chunk = 512;          // --prefill-chunk
 };
 
-// Information about a loaded model
+// Information  about a loaded model
 struct LoadedModel {
     std::unique_ptr<IBackend> backend;
     std::string model_name;       // Short name: "phi3", "qwen3"
@@ -145,7 +145,12 @@ private:
     
     // Thread safety
     mutable std::mutex models_mutex_;
-    
+
+    // Hardware availability (computed once at startup)
+    bool has_metal_available_;
+    bool has_rocm_gpu_available_;
+    bool has_cuda_gpu_available_;
+
     // Empty fallbacks for const references
     static const std::vector<AdditionalToken> empty_tokens_;
     static const GenerationParams default_params_;
