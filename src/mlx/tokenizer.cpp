@@ -1,7 +1,8 @@
 /*
  * tokenizer.cpp
- * * Robust Universal Tokenizer
- * * Features: Special Token Handling, Universal Cleanup, Defensive Parsing
+ *
+ * Robust Universal Tokenizer
+ * Features: Special Token Handling, Universal Cleanup, Defensive Parsing
  */
 
 #include "ryzenai/mlx/tokenizer.h"
@@ -21,30 +22,22 @@ using json = nlohmann::json;
 
 thread_local std::string tl_decoded_buffer;
 
-// =========================================================
-// UNIVERSAL CLEANUP
-// =========================================================
 void universal_cleanup(std::string& text) {
     auto replace_all = [&](const std::string& from, const std::string& to) {
         if (from.empty()) return;
         size_t start_pos = 0;
         while ((start_pos = text.find(from, start_pos)) != std::string::npos) {
             text.replace(start_pos, from.length(), to);
-            start_pos += to.length(); 
+            start_pos += to.length();
         }
     };
-    
-    // Qwen/GPT-2
-    replace_all("\xC4\x8A", "\n"); // Ċ
-    replace_all("\xC4\xA0", " ");  // Ġ
-    replace_all("\xC4\x89", "\t"); // ĉ
-    // Llama/SP
-    replace_all("\xE2\x96\x81", " "); // _
+
+    replace_all("\xC4\x8A", "\n");
+    replace_all("\xC4\xA0", " ");
+    replace_all("\xC4\x89", "\t");
+    replace_all("\xE2\x96\x81", " ");
 }
 
-// =========================================================
-// SENTENCEPIECE
-// =========================================================
 class SentencePieceBackend : public TokenizerBackend {
     sentencepiece::SentencePieceProcessor processor;
 public:
@@ -64,14 +57,11 @@ public:
     }
 };
 
-// =========================================================
-// HUGGINGFACE BPE (With Special Token Support)
-// =========================================================
 class HuggingFaceBackend : public TokenizerBackend {
     std::unordered_map<std::string, int32_t> vocab;
     std::unordered_map<int32_t, std::string> reverse_vocab;
     std::unordered_map<std::string, int> bpe_ranks;
-    std::vector<std::pair<std::string, int32_t>> special_tokens; // For Encode
+    std::vector<std::pair<std::string, int32_t>> special_tokens;
     std::regex pat;
     int32_t unk_token_id = 0;
 
@@ -81,7 +71,6 @@ public:
         std::ifstream f(json_path);
         json j = json::parse(f);
 
-        // 1. Load Vocab
         auto load_vocab = [&](const json& v_obj) {
             for (auto& [token, id] : v_obj.items()) {
                 if (id.is_number_integer()) {
@@ -96,10 +85,9 @@ public:
             if (j.contains("model") && j["model"].contains("vocab")) load_vocab(j["model"]["vocab"]);
             else if (j.contains("vocab")) load_vocab(j["vocab"]);
         } catch (...) {}
-        
+
         std::cout << "[Tokenizer] Vocab size: " << reverse_vocab.size() << std::endl;
 
-        // 2. Load Merges
         try {
             if (j.contains("model") && j["model"].contains("merges")) {
                 auto& merges = j["model"]["merges"];
@@ -112,7 +100,6 @@ public:
             }
         } catch (...) {}
 
-        // 3. Added Tokens (Special Tokens)
         try {
             if (j.contains("added_tokens")) {
                 for (const auto& t : j["added_tokens"]) {
@@ -127,12 +114,10 @@ public:
             }
         } catch (...) {}
 
-        // Sort special tokens by length (longest first) to match greedy
         std::sort(special_tokens.begin(), special_tokens.end(), [](const auto& a, const auto& b) {
             return a.first.length() > b.first.length();
         });
-        
-        // 4. Regex
+
         pat = std::regex(R"(\s+\S+|\S+)", std::regex::optimize);
     }
 
@@ -170,12 +155,10 @@ public:
         bpe_tokens.insert(bpe_tokens.end(), word.begin(), word.end());
     }
 
-    // UPDATED ENCODE: Handles Special Tokens correctly!
     void Encode(const std::string& text, std::vector<int32_t>& ids) override {
         size_t start = 0;
-        
+
         while (start < text.length()) {
-            // 1. Check for Special Tokens at current position
             bool found_special = false;
             for (const auto& [spec_str, spec_id] : special_tokens) {
                 if (text.compare(start, spec_str.length(), spec_str) == 0) {
@@ -187,7 +170,6 @@ public:
             }
             if (found_special) continue;
 
-            // 2. Find next chunk of regular text (until next special token or end)
             size_t next_special_pos = std::string::npos;
             for (const auto& [spec_str, _] : special_tokens) {
                 size_t pos = text.find(spec_str, start);
@@ -197,12 +179,11 @@ public:
                     }
                 }
             }
-            
+
             size_t chunk_len = (next_special_pos == std::string::npos) ? std::string::npos : next_special_pos - start;
             std::string chunk = text.substr(start, chunk_len);
-            
+
             if (!chunk.empty()) {
-                // 3. Run BPE on the regular text chunk
                 std::sregex_iterator it(chunk.begin(), chunk.end(), pat);
                 std::sregex_iterator end;
                 for (; it != end; ++it) {
@@ -212,7 +193,6 @@ public:
                     for (const auto& t : bpe_tokens) {
                         if (vocab.count(t)) ids.push_back(vocab[t]);
                         else {
-                            // Byte fallback
                             for (unsigned char c : t) {
                                 std::stringstream ss; ss << "<0x" << std::hex << std::uppercase << (c < 16 ? "0" : "") << (int)c << ">";
                                 if (vocab.count(ss.str())) { ids.push_back(vocab[ss.str()]); continue; }
@@ -224,7 +204,7 @@ public:
                     }
                 }
             }
-            
+
             if (next_special_pos == std::string::npos) break;
             start = next_special_pos;
         }
@@ -249,10 +229,6 @@ public:
     }
 };
 
-// =========================================================
-// OGA TOKENIZER
-// =========================================================
-
 std::unique_ptr<MlxOgaSequences> MlxOgaSequences::Create() { return std::make_unique<MlxOgaSequences>(); }
 const int32_t* MlxOgaSequences::SequenceData(int) const { return ids.data(); }
 size_t MlxOgaSequences::SequenceCount(int) const { return ids.size(); }
@@ -260,7 +236,6 @@ size_t MlxOgaSequences::SequenceCount(int) const { return ids.size(); }
 std::unique_ptr<MlxOgaTokenizer> MlxOgaTokenizer::Create(const MlxOgaModel& model) {
     auto tok = std::make_unique<MlxOgaTokenizer>();
 
-    // 1. HuggingFace JSON
     std::string hf_path = model.model_path + "/tokenizer.json";
     if (fs::exists(hf_path)) {
         try {
@@ -271,7 +246,6 @@ std::unique_ptr<MlxOgaTokenizer> MlxOgaTokenizer::Create(const MlxOgaModel& mode
         }
     }
 
-    // 2. SentencePiece
     if (!tok->backend) {
         std::string sp_path = model.model_path + "/tokenizer.model";
         if (fs::exists(sp_path)) {

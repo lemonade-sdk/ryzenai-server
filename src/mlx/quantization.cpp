@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 
 /*
  * detect_quantization_config
- * 
+ *
  * Reads the model's config.json and extracts quantization settings.
  * Checks multiple locations where quantization config may appear:
  *   - quantization section (MLX native)
@@ -44,7 +44,7 @@ QuantizationConfig detect_quantization_config(const std::string& model_path) {
 
         if (json_config.contains("quantization")) {
             auto& quant = json_config["quantization"];
-            
+
             if (quant.contains("bits"))
                 config.bits = quant["bits"].get<int>();
             if (quant.contains("group_size"))
@@ -53,7 +53,7 @@ QuantizationConfig detect_quantization_config(const std::string& model_path) {
                 config.scheme = quant["quant_method"].get<std::string>();
             if (quant.contains("symmetric"))
                 config.symmetric = quant["symmetric"].get<bool>();
-            
+
             std::cout << "[Quantization] Config: bits=" << config.bits
                       << ", group_size=" << config.group_size
                       << ", scheme=" << config.scheme
@@ -63,7 +63,7 @@ QuantizationConfig detect_quantization_config(const std::string& model_path) {
 
         if (config.bits == 0 && json_config.contains("quantization_config")) {
             auto& quant = json_config["quantization_config"];
-            
+
             if (quant.contains("bits"))
                 config.bits = quant["bits"].get<int>();
             if (quant.contains("group_size"))
@@ -75,7 +75,7 @@ QuantizationConfig detect_quantization_config(const std::string& model_path) {
         if (json_config.contains("gptq")) {
             auto& gptq = json_config["gptq"];
             config.scheme = "gptq";
-            
+
             if (gptq.contains("bits"))
                 config.bits = gptq["bits"].get<int>();
             if (gptq.contains("group_size"))
@@ -85,7 +85,7 @@ QuantizationConfig detect_quantization_config(const std::string& model_path) {
         if (json_config.contains("awq")) {
             auto& awq = json_config["awq"];
             config.scheme = "awq";
-            
+
             if (awq.contains("bits"))
                 config.bits = awq["bits"].get<int>();
             if (awq.contains("group_size"))
@@ -102,7 +102,7 @@ QuantizationConfig detect_quantization_config(const std::string& model_path) {
 
 /*
  * detect_quantization_from_weights
- * 
+ *
  * Analyzes weight and scale tensor shapes to infer quantization parameters.
  * Tries different bit widths (4, 2, 8) to find a consistent configuration.
  */
@@ -153,7 +153,7 @@ QuantizationConfig detect_quantization_from_weights(
                 if (group_size * num_groups == in_features && group_size > 0) {
                     config.bits = bits;
                     config.group_size = static_cast<int>(group_size);
-                    
+
                     std::cout << "[Quantization] Detected " << base_name
                               << ": bits=" << config.bits
                               << ", group_size=" << config.group_size << std::endl;

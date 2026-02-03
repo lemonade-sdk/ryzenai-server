@@ -250,6 +250,11 @@ if(BUILD_MLX)
     target_link_libraries(ryzenai-server PRIVATE mlx sentencepiece-static)
 endif()
 
+#Add ability to detect if built in debug mode
+target_compile_definitions(ryzenai-server PUBLIC
+    "$<$<CONFIG:Debug>:DEBUG>"
+)
+
 # Enable multi-threading for cpp-httplib
 target_compile_definitions(ryzenai-server PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=8)
 

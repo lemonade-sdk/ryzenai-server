@@ -70,7 +70,8 @@ ReasoningParseResult parseReasoningContentWithModel(const std::string& text, con
     // Fallback to defaults if not found
     if (think_start.empty()) think_start = "<think>";
     if (think_end.empty()) think_end = "</think>";
-
+    size_t close_pos = text.rfind(think_end);  // Use rfind to get LAST occurrence!
+#if defined(DEBUG)
     std::cout << "[parseReasoning] text length=" << text.length() 
               << ", think_start='" << think_start << "'"
               << ", think_end='" << think_end << "'" << std::endl;
@@ -81,14 +82,14 @@ ReasoningParseResult parseReasoningContentWithModel(const std::string& text, con
 
     // For Qwen3-Thinking style (no opening tag), we need to find the LAST </think>
     // because the model might output multiple close tags or a quick close at the start
-    size_t close_pos = text.rfind(think_end);  // Use rfind to get LAST occurrence!
+
     std::cout << "[parseReasoning] close_pos (rfind)=" << close_pos << " (npos=" << std::string::npos << ")" << std::endl;
     
     if (close_pos != std::string::npos) {
         std::cout << "[parseReasoning] Found </think> at position " << close_pos 
                   << " out of " << text.length() << " total chars" << std::endl;
     }
-
+#endif
     if (close_pos == std::string::npos) {
         // No closing tag found
         // Check if there's an unclosed opening tag
@@ -130,7 +131,9 @@ ReasoningParseResult parseReasoningContentWithModel(const std::string& text, con
         if (early_close != std::string::npos && early_close < 50) {
             // Found an early close tag - remove everything up to and including it
             result.reasoning_content = result.reasoning_content.substr(early_close + think_end.length());
+#if defined(DEBUG)
             std::cout << "[parseReasoning] Cleaned up early </think> prefix from reasoning" << std::endl;
+#endif
         }
         
         // Trim leading whitespace from reasoning content

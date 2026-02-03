@@ -13,6 +13,7 @@
 #include "ryzenai/mlx/tokenizer.h"
 #include <memory>
 #include <vector>
+#include <chrono>
 
 
 /*
@@ -51,6 +52,7 @@ struct MlxOgaGenerator {
     const MlxOgaTokenizer* tokenizer = nullptr;
     MlxOgaGeneratorParams params;
     std::vector<int32_t> current_tokens;
+    std::string generated_text = "";
     bool done = false;
     std::unique_ptr<BaseInferenceEngine> inference_engine;
 
@@ -58,6 +60,13 @@ struct MlxOgaGenerator {
     size_t input_token_count = 0;
     std::string accumulated_text;
     std::vector<std::string> stop_sequences;
+
+    // For statistics (measured at end without per-token eval overhead)
+    std::chrono::high_resolution_clock::time_point prefill_start_time_;
+    std::chrono::high_resolution_clock::time_point decode_start_time_;
+    size_t prompt_tokens_processed = 0;
+    size_t generation_tokens_generated = 0;
+    bool prefill_done_ = false;
 
     /*
      * Create
