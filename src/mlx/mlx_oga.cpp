@@ -594,7 +594,7 @@ void MlxOgaGenerator::GenerateNextToken() {
 
 #if defined(DEBUG)
         static int debug_count = 0;
-        if (debug_count < 10000 && DEBUG_OUTPUT) {
+        if (debug_count < 100 && true) {
             std::cout << "[Generator] Token " << debug_count << ": ID=" << next_token;
             if (this->tokenizer) {
                 MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
