@@ -65,9 +65,9 @@ public:
     /**
      * @brief Set the MLX default device for the specified backend type
      * @param type The backend type (MLX_METAL, MLX_ROCM, MLX_CUDA)
-     * @return true if device was set successfully, false otherwise
+     * @return Device index if set successfully, -1 otherwise
      */
-    static bool setMlxDeviceForBackend(BackendType type);
+    static int setMlxDeviceForBackend(BackendType type);
 
     /**
      * @brief Get device capabilities for the current MLX device

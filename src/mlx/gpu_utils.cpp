@@ -89,7 +89,7 @@ int GpuUtils::findFirstGpuOfType(BackendType type) {
 }
 
 // Set the MLX default device for the specified backend type
-bool GpuUtils::setMlxDeviceForBackend(BackendType type) {
+int GpuUtils::setMlxDeviceForBackend(BackendType type) {
     // Check if any GPUs are available
     int gpu_count = ::mlx::core::device_count(::mlx::core::Device::DeviceType::gpu);
     bool has_gpus = (gpu_count > 0);
@@ -99,10 +99,10 @@ bool GpuUtils::setMlxDeviceForBackend(BackendType type) {
             if (has_gpus) {
                 std::cout << "[GpuUtils] Setting MLX default device to Metal GPU" << std::endl;
                 ::mlx::core::set_default_device(::mlx::core::Device::gpu);
-                return true;
+                return 0;  // Assume GPU 0 for Metal
             } else {
                 std::cout << "[GpuUtils] No GPUs available for Metal backend" << std::endl;
-                return false;
+                return -1;
             }
 
         case BackendType::MLX_ROCM: {
@@ -115,16 +115,16 @@ bool GpuUtils::setMlxDeviceForBackend(BackendType type) {
                 if (current_device.type == ::mlx::core::Device::DeviceType::gpu &&
                     current_device.index == gpu_index) {
                     std::cout << "[GpuUtils] Successfully set device to ROCm GPU " << gpu_index << std::endl;
-                    return true;
+                    return gpu_index;
                 } else {
                     std::cout << "[GpuUtils] Failed to set device to GPU " << gpu_index
                               << ", current device type: " << (current_device.type == ::mlx::core::Device::DeviceType::cpu ? "cpu" : "gpu")
                               << ", index: " << current_device.index << std::endl;
-                    return false;
+                    return -1;
                 }
             } else {
                 std::cout << "[GpuUtils] No ROCm-compatible GPU found" << std::endl;
-                return false;
+                return -1;
             }
         }
 
@@ -133,10 +133,10 @@ bool GpuUtils::setMlxDeviceForBackend(BackendType type) {
             if (gpu_index >= 0) {
                 std::cout << "[GpuUtils] Setting MLX default device to CUDA GPU (index " << gpu_index << ")" << std::endl;
                 ::mlx::core::set_default_device(::mlx::core::Device(::mlx::core::Device::gpu, gpu_index));
-                return true;
+                return gpu_index;
             } else {
                 std::cout << "[GpuUtils] No CUDA-compatible GPU found" << std::endl;
-                return false;
+                return -1;
             }
         }
 
@@ -144,7 +144,7 @@ bool GpuUtils::setMlxDeviceForBackend(BackendType type) {
         // Fallback to CPU for unknown types
         std::cout << "[GpuUtils] Setting MLX default device to CPU" << std::endl;
         ::mlx::core::set_default_device(::mlx::core::Device::cpu);
-        return true;
+        return -1;  // CPU has no device index
     }
 }
 
@@ -180,6 +180,21 @@ DeviceCapabilities GpuUtils::getDeviceCapabilities() {
             caps.total_memory_mb = max_buffer / (1024 * 1024);
             // Available memory is approximately total minus some overhead
             caps.available_memory_mb = caps.total_memory_mb * 0.9;  // Conservative estimate
+        } else {
+            // Fallback for CUDA/ROCm which use "total_memory"
+            auto total_it = device_info.find("total_memory");
+            if (total_it != device_info.end()) {
+                size_t total_mem = std::get<size_t>(total_it->second);
+                caps.total_memory_mb = total_mem / (1024 * 1024);
+                // For available memory, also check free_memory
+                auto free_it = device_info.find("free_memory");
+                if (free_it != device_info.end()) {
+                    size_t free_mem = std::get<size_t>(free_it->second);
+                    caps.available_memory_mb = free_mem / (1024 * 1024);
+                } else {
+                    caps.available_memory_mb = caps.total_memory_mb * 0.9;  // Conservative estimate
+                }
+            }
         }
 
         // Extract architecture
