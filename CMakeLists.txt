@@ -93,7 +93,7 @@ if(BUILD_MLX)
     message(STATUS "Fetching MLX...")
     FetchContent_Declare(
         mlx
-        GIT_REPOSITORY https://github.com/NripeshN/mlx.git
+        GIT_REPOSITORY https://github.com/Geramy/mlx.git
         GIT_TAG rocm-support
         GIT_SHALLOW FALSE      # <--- Faster download
         GIT_PROGRESS TRUE     # <--- SHOWS YOU THE DOWNLOAD BAR
