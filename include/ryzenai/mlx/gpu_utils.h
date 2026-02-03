@@ -23,6 +23,25 @@ struct GpuInfo {
     std::unordered_map<std::string, std::variant<std::string, size_t>> properties;
 };
 
+// Device capabilities structure
+struct DeviceCapabilities {
+    size_t total_memory_mb = 0;
+    size_t available_memory_mb = 0;
+    int compute_capability_major = 0;
+    int compute_capability_minor = 0;
+    bool supports_fp16 = false;
+    bool supports_int8 = false;
+    bool supports_int4 = false;
+    bool supports_matmul = false;
+    bool supports_quantized_matmul = false;
+    bool supports_fast_matmul = false;
+    bool supports_rope = false;
+    bool supports_sdpa = false;
+    std::string architecture;
+    int max_threads_per_block = 0;
+    int multiprocessor_count = 0;
+};
+
 /**
  * @brief GPU utilities class for MLX backends
  *
@@ -49,6 +68,12 @@ public:
      * @return true if device was set successfully, false otherwise
      */
     static bool setMlxDeviceForBackend(BackendType type);
+
+    /**
+     * @brief Get device capabilities for the current MLX device
+     * @return DeviceCapabilities structure with current device capabilities
+     */
+    static DeviceCapabilities getDeviceCapabilities();
 
 private:
     GpuUtils() = delete; // Static utility class

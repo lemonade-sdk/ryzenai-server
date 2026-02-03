@@ -36,13 +36,21 @@ void MlxBackend::loadModel(const std::string& model_path) {
     std::cout << "[MlxBackend] Loading model from: " << model_path_ << std::endl;
 
     // Set the appropriate MLX device based on backend type
-    ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(type_);
+    if (!ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(type_)) {
+        throw std::runtime_error("Failed to set MLX device for backend type: " + getName());
+    }
 
     // Create model using factory method
     model_ = MlxOgaModel::Create(model_path_.c_str());
     if (!model_) {
         throw std::runtime_error("Failed to create model");
     }
+
+    // Set the backend type for this model
+    model_->backend_type = type_;
+
+    // Note: Model weights are loaded on the current default device
+    // In MLX, arrays are created on the default device when loaded
     
     // Create tokenizer
     tokenizer_ = MlxOgaTokenizer::Create(*model_);

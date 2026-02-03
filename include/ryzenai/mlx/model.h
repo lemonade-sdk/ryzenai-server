@@ -11,6 +11,7 @@
 #include "ryzenai/mlx/common.h"
 #include "ryzenai/mlx/quantization.h"
 #include "ryzenai/types.h"
+#include "ryzenai/backend/backend.h"
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -61,6 +62,9 @@ struct MlxOgaModel {
 
     // Additional special tokens for streaming detection
     std::vector<AdditionalToken> additional_tags;
+
+    // Backend type preference (from config or auto-detected)
+    ryzenai::BackendType backend_type = ryzenai::BackendType::AUTO;
 
     QuantizationConfig quantization;
     std::unordered_map<std::string, array> weights;
