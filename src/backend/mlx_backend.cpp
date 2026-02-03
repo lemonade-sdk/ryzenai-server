@@ -9,7 +9,6 @@
 #include <ryzenai/mlx/mlx_oga.h>
 #include <ryzenai/mlx/gpu_utils.h>
 #include <mlx/device.h>
-#include <mlx/backend/gpu/available.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>

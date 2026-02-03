@@ -11,7 +11,6 @@
 #ifdef MLX_ON
 #include "ryzenai/backend/mlx_backend.h"
 #include "ryzenai/mlx/gpu_utils.h"
-#include <mlx/backend/gpu/available.h>
 #include <mlx/backend/metal/metal.h>
 #include <mlx/backend/cuda/cuda.h>
 #include <mlx/backend/rocm/rocm.h>

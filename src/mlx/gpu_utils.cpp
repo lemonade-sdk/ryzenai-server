@@ -30,27 +30,37 @@ std::vector<GpuInfo> GpuUtils::discoverAvailableGpus() {
             // Determine GPU type based on device properties
             BackendType gpu_type = BackendType::AUTO; // Unknown initially
 
-            // Check for CUDA/NVIDIA GPU
-            auto arch_it = device_info.find("architecture");
-            if (arch_it != device_info.end()) {
-                std::string arch = std::get<std::string>(arch_it->second);
-                if (arch.find("sm_") == 0) {
-                    gpu_type = BackendType::MLX_CUDA;
-                } else if (arch.find("gfx") == 0 || arch.find("rdna") == 0) {
+            // Check for GCN arch name first (ROCm-specific) - this is most reliable
+            auto gcn_it = device_info.find("gcnArchName");
+            if (gcn_it != device_info.end()) {
+                std::string gcn_arch = std::get<std::string>(gcn_it->second);
+                if (!gcn_arch.empty()) {
                     gpu_type = BackendType::MLX_ROCM;
                 }
             }
 
-            // Check for compute capability (CUDA-specific)
-            auto cc_it = device_info.find("compute_capability_major");
-            if (cc_it != device_info.end()) {
-                gpu_type = BackendType::MLX_CUDA;
+            // If not determined by GCN arch, check architecture string
+            if (gpu_type == BackendType::AUTO) {
+                auto arch_it = device_info.find("architecture");
+                if (arch_it != device_info.end()) {
+                    std::string arch = std::get<std::string>(arch_it->second);
+                    if (arch.find("sm_") == 0) {
+                        gpu_type = BackendType::MLX_CUDA;
+                    } else if (arch.find("gfx") == 0 || arch.find("rdna") == 0) {
+                        gpu_type = BackendType::MLX_ROCM;
+                    }
+                }
             }
 
-            // Check for GCN arch name (ROCm-specific)
-            auto gcn_it = device_info.find("gcnArchName");
-            if (gcn_it != device_info.end()) {
-                gpu_type = BackendType::MLX_ROCM;
+            // Only classify as CUDA if we have valid compute capability (> 0)
+            if (gpu_type == BackendType::AUTO) {
+                auto cc_it = device_info.find("compute_capability_major");
+                if (cc_it != device_info.end()) {
+                    size_t cc_major = std::get<size_t>(cc_it->second);
+                    if (cc_major > 0) {
+                        gpu_type = BackendType::MLX_CUDA;
+                    }
+                }
             }
 
             gpu.type = gpu_type;

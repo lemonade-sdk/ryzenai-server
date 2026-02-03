@@ -94,7 +94,7 @@ if(BUILD_MLX)
     FetchContent_Declare(
         mlx
         GIT_REPOSITORY https://github.com/Geramy/mlx.git
-        GIT_TAG rocm-support
+        GIT_TAG        "geramy/rocm-performance-upgrade"
         GIT_SHALLOW FALSE      # <--- Faster download
         GIT_PROGRESS TRUE     # <--- SHOWS YOU THE DOWNLOAD BAR
     )
