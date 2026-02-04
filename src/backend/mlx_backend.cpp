@@ -35,7 +35,8 @@ void MlxBackend::loadModel(const std::string& model_path) {
     std::cout << "[MlxBackend] Loading model from: " << model_path_ << std::endl;
 
     // Set the appropriate MLX device based on backend type
-    if (!ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(type_)) {
+    // Return value is GPU index on success, -1 on failure
+    if (ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(type_) < 0) {
         throw std::runtime_error("Failed to set MLX device for backend type: " + getName());
     }
 
