@@ -22,6 +22,7 @@
 namespace ryzenai::mlx {
 
 using ::mlx::core::array;
+using ::mlx::core::Shape;
 using ::mlx::core::Dtype;
 using ::mlx::core::int8;
 using ::mlx::core::float32;
@@ -378,15 +379,15 @@ public:
         k_cache_[layer_idx] = slice_update(
             k_cache_[layer_idx], 
             new_k, 
-            {0, 0, position_, 0},  // start
-            {1, num_kv_heads_, new_pos, head_dim_}  // stop
+            Shape{0, 0, position_, 0},  // start
+            Shape{1, num_kv_heads_, new_pos, head_dim_}  // stop
         );
         
         v_cache_[layer_idx] = slice_update(
             v_cache_[layer_idx], 
             new_v, 
-            {0, 0, position_, 0},
-            {1, num_kv_heads_, new_pos, head_dim_}
+            Shape{0, 0, position_, 0},
+            Shape{1, num_kv_heads_, new_pos, head_dim_}
         );
         
         // Return slice of valid cache [0:new_pos]
