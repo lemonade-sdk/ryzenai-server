@@ -54,6 +54,8 @@ public:
     array forward(const std::vector<int32_t>& input_tokens,
                   const MlxOgaGeneratorParams& params) override;
 
+    array forward(const array& tokens, const MlxOgaGeneratorParams& params) override;
+
     /*
      * sample_token
      * Selects the next token from output logits.
