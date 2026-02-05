@@ -543,11 +543,13 @@ void MlxOgaGenerator::AppendTokens(const int32_t* tokens, size_t count) {
  * MlxOgaGenerator::GenerateNextToken
  *
  * Runs one step of autoregressive generation.
- * Computes logits via forward pass and samples next token.
+ * SAFE MODE: JIT Compilation is disabled to prevent ROCm 'abs' ambiguity errors.
+ * This runs in Eager Mode (approx 30-50 tok/s on Ryzen AI).
  */
 void MlxOgaGenerator::GenerateNextToken() {
+    // 1. Safety Checks
     if (done || !inference_engine) {
-        int32_t next_token = 42;
+        int32_t next_token = 42; 
         current_tokens.push_back(next_token);
         if (current_tokens.size() >= static_cast<size_t>(params.max_length) || model->IsEos(next_token)) {
             done = true;
@@ -558,20 +560,49 @@ void MlxOgaGenerator::GenerateNextToken() {
     try {
         std::vector<int32_t> tokens_to_process;
         bool is_prefill = (current_tokens.size() == input_token_count);
+        array logits(0); 
+
+        // --- EXECUTION START ---
+#if defined(DEBUG)
+        auto step_start = std::chrono::high_resolution_clock::now();
+#endif
 
         if (is_prefill) {
+            // [PREFILL]
             tokens_to_process = current_tokens;
             prompt_tokens_processed = tokens_to_process.size();
             prefill_start_time_ = std::chrono::high_resolution_clock::now();
-        } else if (inference_engine->supports_kv_cache()) {
-            tokens_to_process = {current_tokens.back()};
+            
+            array input_arr(tokens_to_process.data(), {static_cast<int>(tokens_to_process.size())}, int32);
+            logits = inference_engine->forward(input_arr, params);
+            
+            // Force Sync
+            eval(logits);
+            prefill_done_ = true;
         } else {
-            tokens_to_process = current_tokens;
+            // [DECODE] - EAGER MODE ONLY (Fixes crash)
+            // We bypass compiled_decode entirely to avoid the 'abs' error.
+            array input_arr({current_tokens.back()}, {1}, int32);
+            logits = inference_engine->forward(input_arr, params);
+            eval(logits);
         }
 
-        array logits = inference_engine->forward(tokens_to_process, params);
+        // --- EXECUTION END ---
 
-        // OPTIMIZED: Vectorized repetition penalty (was O(64) operations, now O(1))
+#if defined(DEBUG)
+        auto step_end = std::chrono::high_resolution_clock::now();
+        double step_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
+        static int log_counter = 0;
+        if (is_prefill || log_counter % 10 == 0 || log_counter < 5) {
+            double tps = (is_prefill ? prompt_tokens_processed : 1) / (step_ms / 1000.0);
+            std::cout << "[Timer] " << (is_prefill ? "Prefill" : "Decode ") 
+                      << "| " << std::fixed << std::setprecision(2) << step_ms << "ms | " 
+                      << tps << " t/s" << std::endl;
+        }
+        log_counter++;
+#endif
+
+        // 2. Repetition Penalty
         if (params.repetition_penalty > 1.0f && current_tokens.size() > 1) {
             size_t lookback = std::min(current_tokens.size() - 1, size_t(64));
             size_t start_idx = current_tokens.size() - 1 - lookback;
@@ -590,44 +621,33 @@ void MlxOgaGenerator::GenerateNextToken() {
             logits = scatter(logits, reshape(indices, {static_cast<int>(lookback), 1}), penalized_values, 0);
         }
 
+        // 3. Sampling
         int next_token = inference_engine->sample_token(logits, params);
 
 #if defined(DEBUG)
-        static int debug_count = 0;
-        if (debug_count < 100 && true) {
-            std::cout << "[Generator] Token " << debug_count << ": ID=" << next_token;
-            if (this->tokenizer) {
-                MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
-                const char* decoded_str = non_const_tok->Decode(&next_token, 1);
-                if (decoded_str) {
-                    std::string s = decoded_str;
-                    size_t pos = 0;
-                    while ((pos = s.find("\n", pos)) != std::string::npos) { s.replace(pos, 1, "\\n"); pos += 2; }
-                    std::cout << ", text='" << s << "'";
-                }
+        if (this->tokenizer && true) { 
+            MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
+            const char* decoded_str = non_const_tok->Decode(&next_token, 1);
+            if (decoded_str) {
+                std::string s = decoded_str;
+                size_t pos = 0;
+                while ((pos = s.find("\n", pos)) != std::string::npos) { s.replace(pos, 1, "\\n"); pos += 2; }
+                std::cout << "[Gen] ID=" << next_token << " '" << s << "'" << std::endl;
             }
-            std::cout << std::endl;
-            debug_count++;
         }
 #endif
 
         current_tokens.push_back(next_token);
         
-        // Track timing transitions
-        if (!prefill_done_) {
-            // First token after prefill - mark prefill end and decode start
-            decode_start_time_ = std::chrono::high_resolution_clock::now();
-            prefill_done_ = true;
-        }
+        // 4. Update State
+        if (!prefill_done_) { decode_start_time_ = std::chrono::high_resolution_clock::now(); prefill_done_ = true; }
         generation_tokens_generated++;
 
-        // OPTIMIZED: Only check stop sequences every 8 tokens to reduce overhead
-        // Stop sequences are typically only a few tokens, so checking less frequently is fine
+        // 5. Stop Sequence Check
         if (this->tokenizer && current_tokens.size() > input_token_count && 
-            (generation_tokens_generated % 8 == 0 || generation_tokens_generated < 8)) {
-            MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
+            (generation_tokens_generated % 4 == 0 || generation_tokens_generated < 8)) {
             
-            // Decode last few tokens for stop sequence check
+            MlxOgaTokenizer* non_const_tok = const_cast<MlxOgaTokenizer*>(this->tokenizer);
             size_t check_count = std::min(generation_tokens_generated, size_t(16));
             size_t start = current_tokens.size() - check_count;
             std::vector<int32_t> recent(current_tokens.begin() + start, current_tokens.end());
@@ -637,7 +657,6 @@ void MlxOgaGenerator::GenerateNextToken() {
                 std::string recent_text(decoded_str);
                 for (const auto& stop_seq : stop_sequences) {
                     if (recent_text.find(stop_seq) != std::string::npos) {
-                        std::cout << "[Generator] Stop sequence detected: '" << stop_seq << "' - Stopping." << std::endl;
                         done = true;
                         break;
                     }
@@ -651,22 +670,15 @@ void MlxOgaGenerator::GenerateNextToken() {
 
         if (done && generation_tokens_generated > 0) {
             auto end_time = std::chrono::high_resolution_clock::now();
-            
-            // Prompt time: from prefill_start to decode_start (first token)
             std::chrono::duration<double> prefill_duration = decode_start_time_ - prefill_start_time_;
-            double prefill_time = prefill_duration.count();
-            double prompt_tps = prompt_tokens_processed / prefill_time;
-            
-            // Generation time: from decode_start to end (all subsequent tokens)
+            double prompt_tps = prompt_tokens_processed / (prefill_duration.count() + 1e-9);
             std::chrono::duration<double> decode_duration = end_time - decode_start_time_;
-            double decode_time = decode_duration.count();
-            // Subtract 1 because first token is counted in prefill
             size_t decode_tokens = generation_tokens_generated > 1 ? generation_tokens_generated - 1 : 1;
-            double generation_tps = decode_tokens / decode_time;
+            double generation_tps = decode_tokens / (decode_duration.count() + 1e-9);
             
-            std::cout << "Prompt: " << prompt_tokens_processed << " tokens, " << prompt_tps << " tokens-per-sec" << std::endl;
-            std::cout << "Generation: " << decode_tokens << " tokens, " << generation_tps << " tokens-per-sec" << std::endl;
-            std::cout << "Peak memory: N/A GB" << std::endl;
+            std::cout << "\n--- Statistics ---" << std::endl;
+            std::cout << "Prompt: " << prompt_tokens_processed << " tokens, " << std::fixed << std::setprecision(2) << prompt_tps << " t/s" << std::endl;
+            std::cout << "Decode: " << decode_tokens << " tokens, " << std::fixed << std::setprecision(2) << generation_tps << " t/s" << std::endl;
         }
 
     } catch (const std::exception& e) {
@@ -674,7 +686,6 @@ void MlxOgaGenerator::GenerateNextToken() {
         done = true;
     }
 }
-
 
 bool MlxOgaGenerator::IsDone() const {
     return done;

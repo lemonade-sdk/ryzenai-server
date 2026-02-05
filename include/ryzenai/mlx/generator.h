@@ -55,6 +55,9 @@ struct MlxOgaGenerator {
     std::string generated_text = "";
     bool done = false;
     std::unique_ptr<BaseInferenceEngine> inference_engine;
+    std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)> compiled_decode;
+    bool is_compiled = false;
+    bool jit_failed = false;
 
     // For stop sequence detection
     size_t input_token_count = 0;

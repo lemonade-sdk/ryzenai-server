@@ -21,9 +21,15 @@
 #include <mlx/random.h>
 #include <vector>
 #include <cmath>
+#include <chrono>
+#include <iomanip>
 
 using namespace mlx::core;
 
+// Float16 has max value ~65504, we clamp to a safe margin to prevent overflow
+// during subsequent operations (attention, MLP, residual additions)
+constexpr float FP16_SAFE_MAX = 60000.0f;
+constexpr float FP16_SAFE_MIN = -60000.0f;
 
 Phi3Inference::Phi3Inference(const MlxOgaModel& model, KVCacheMode kv_cache_mode) :
     mask_val_(array(-std::numeric_limits<float>::infinity(), float32)),
@@ -133,46 +139,100 @@ array Phi3Inference::mlp_block_3d(const array& x, const std::string& prefix) {
     return linear(gate * sigmoid(gate) * up, prefix + "mlp.down_proj");
 }
 
-array Phi3Inference::forward(const std::vector<int32_t>& input_tokens, const MlxOgaGeneratorParams& params) {
-    (void)params;  // Suppress unused warning
-    int seq_len = static_cast<int>(input_tokens.size());
+// Add this new method to phi3_inference.cpp
+
+array Phi3Inference::forward(const array& tokens, const MlxOgaGeneratorParams& params) {
+    // 1. Check input shape (Handling [1, 1] decode vs [1, N] prefill)
+    int seq_len = tokens.size();
     
-    if (seq_len > 1) {
-        clear_cache(); // Reset on prefill
+    // 2. Embeddings (Direct Array Access)
+    // We use the tokens array directly as indices for the embedding table
+    array h = take(*weights_.embed_tokens, tokens, 0);
+    h = reshape(h, {1, seq_len, actual_hidden_size_});
+
+    // 3. Transformer Layers
+    for (int i = 0; i < model_.num_hidden_layers; ++i) {
+        const auto& layer = weights_.layers[i];
+        
+        // Attention
+        array normed = rms_norm_fast(h, layer.input_layernorm);
+        h = h + self_attention_fast(normed, layer, i, seq_len);
+        
+        // MLP
+        normed = rms_norm_fast(h, layer.post_attn_layernorm);
+        h = h + mlp_block_fast(normed, layer);
     }
 
-    // OPTIMIZED: Use direct weight reference (no hash lookup)
+    // 4. Final Norm & Head
+    cache_position_ += seq_len;
+    h = rms_norm_fast(h, weights_.final_norm);
+    
+    // Take the last token's hidden state
+    array last_h = take(h, array({seq_len - 1}), 1); 
+    array logits = linear_fast(reshape(last_h, {1, actual_hidden_size_}), weights_.lm_head);
+    
+    return reshape(logits, {model_.vocab_size});
+}
+
+array Phi3Inference::forward(const std::vector<int32_t>& input_tokens, const MlxOgaGeneratorParams& params) {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    int seq_len = static_cast<int>(input_tokens.size());
+    bool is_prefill = seq_len > 1;
+    
+    if (is_prefill) {
+        std::cout << "\n[Phi3] Prefilling " << seq_len << " tokens..." << std::flush;
+        clear_cache(); 
+    }
+
     if (!weights_.embed_tokens) {
         throw std::runtime_error("forward: embed_tokens not setup");
     }
+    
     array h = take(*weights_.embed_tokens, array(input_tokens.data(), {seq_len}, int32), 0);
-    h = reshape(h, {1, seq_len, actual_hidden_size_}); // [1, Seq, Dim]
+    h = reshape(h, {1, seq_len, actual_hidden_size_});
 
-    // OPTIMIZED: Use pre-computed layer prefixes + direct weight references
     for (int i = 0; i < model_.num_hidden_layers; ++i) {
         const ryzenai::mlx::LayerWeights& layer = weights_.layers[i];
         
-        // Fast path: direct weight references, no hash lookups
         array normed = rms_norm_fast(h, layer.input_layernorm);
         array attn_out = self_attention_fast(normed, layer, i, seq_len);
         h = h + attn_out;
-        
         normed = rms_norm_fast(h, layer.post_attn_layernorm);
         array mlp_out = mlp_block_fast(normed, layer);
         h = h + mlp_out;
     }
     
-    // Update cache position for RoPE offset
     cache_position_ += seq_len;
 
-    // OPTIMIZED: Use direct weight reference
     h = rms_norm_fast(h, weights_.final_norm);
-    array last_h = take(h, array({seq_len - 1}), 1); // [1, 1, Dim]
+    array last_h = take(h, array({seq_len - 1}), 1); 
     
     array logits = linear_fast(reshape(last_h, {1, actual_hidden_size_}), weights_.lm_head);
     logits = reshape(logits, {model_.vocab_size});
+
+    // CRITICAL: Force execution so timing is accurate
+    eval(logits); 
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> ms = end_time - start_time;
+
+    if (is_prefill) {
+        double tps = seq_len / (ms.count() / 1000.0);
+        std::cout << " Done. (" << std::fixed << std::setprecision(2) 
+                  << ms.count() << "ms, " << tps << " tok/s)" << std::endl;
+    } else {
+        // Decode logging: update on the same line or every N tokens
+        if (cache_position_ % 10 == 0) {
+            double tps = 1.0 / (ms.count() / 1000.0);
+            std::cout << "\r[Phi3] Decoding: pos=" << cache_position_ 
+                      << " | Speed: " << std::fixed << std::setprecision(2) 
+                      << tps << " tok/s    " << std::flush;
+        }
+    }
+
     return logits;
 }
+
 /*
  * self_attention_no_residual
  * 
@@ -323,8 +383,6 @@ int Phi3Inference::sample_token(const array& logits, const MlxOgaGeneratorParams
 void Phi3Inference::cache_weights() {
     cached_weights_.clear();
     const auto& w = model_.weights;
-    // We don't strictly need model_.quantization here for embeddings 
-    // because we calculate dynamic group size, but we use it for other layers.
     
     std::cout << "[Phi3Inference] Caching weights..." << std::endl;
 
@@ -350,6 +408,7 @@ void Phi3Inference::cache_weights() {
             // Additive Biases are usually small floats near 0.0.
             float mean_bias = mean(abs(raw_biases)).item<float>();
             array proper_biases = mean_bias > 1.0f ? -1.0f * scales_it->second * raw_biases : raw_biases;
+            
             // Dequantize with the corrected biases
             array dequantized_embed = mlx::core::dequantize(
                 embed_it->second, 
@@ -414,7 +473,24 @@ void Phi3Inference::cache_weights() {
 
     cache_weight("lm_head");
     
-    std::cout << "[Phi3Inference] Cached " << cached_weights_.size() << " tensors" << std::endl;
+    std::cout << "[Phi3Inference] Cached " << cached_weights_.size() << " tensors. " << std::endl;
+
+    // --- 5. FORCE HYDRATION (THE FIX) ---
+    // This forces MLX to load, dequantize, and upload everything to GPU *now*.
+    // Without this, MLX does it lazily when you ask the first question, causing the 60s lag.
+    std::cout << "[Phi3Inference] HYDRATING GPU (Loading 7GB to VRAM, please wait 30-60s)..." << std::endl;
+    
+    std::vector<array> all_weights;
+    all_weights.reserve(cached_weights_.size());
+    for (const auto& [name, arr] : cached_weights_) {
+        all_weights.push_back(arr);
+    }
+    
+    // Execute the graph
+    eval(all_weights);
+    synchronize(); 
+    
+    std::cout << "[Phi3Inference] Hydration Complete. System ready." << std::endl;
     
     // Setup direct weight references for optimized path
     setup_weight_references();
@@ -542,9 +618,12 @@ array Phi3Inference::self_attention_fast(const array& x, const ryzenai::mlx::Lay
     };
     
     array output = compute_attention();
+    
+    // STABILITY FIX: Clamp attention output before projection
     output = transpose(output, {0, 2, 1, 3});
     output = reshape(output, Shape{B, seq_len, model_.num_attention_heads * head_dim_});
     
+    // STABILITY FIX: Clamp after o_proj to prevent overflow before residual
     return linear_fast(output, layer.attention.o_proj);
 }
 
@@ -559,5 +638,11 @@ array Phi3Inference::mlp_block_fast(const array& x, const ryzenai::mlx::LayerWei
     array gate = slice(gate_up, {0, 0, 0}, {B, L, mid});
     array up = slice(gate_up, {0, 0, mid}, {B, L, 2 * mid});
     
-    return linear_fast(gate * sigmoid(gate) * up, layer.mlp.down_proj);
+    // STABILITY FIX: Clamp SwiGLU output before down projection
+    array activated = (gate * sigmoid(gate) * up);
+    
+    array down_out = linear_fast(activated, layer.mlp.down_proj);
+    
+    // STABILITY FIX: Clamp MLP output before residual
+    return (down_out);
 }

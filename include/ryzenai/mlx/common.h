@@ -40,6 +40,10 @@ public:
      */
     virtual array forward(const std::vector<int32_t>& input_tokens,
                           const MlxOgaGeneratorParams& params) = 0;
+                          
+    virtual mlx::core::array forward(const mlx::core::array& tokens, const MlxOgaGeneratorParams& params) {
+        throw std::runtime_error("forward(array) not implemented for this model");
+    }
 
     /*
      * sample_token
