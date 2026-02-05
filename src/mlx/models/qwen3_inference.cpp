@@ -107,7 +107,7 @@ Qwen3Inference::Qwen3Inference(const MlxOgaModel& model, ryzenai::KVCacheMode kv
     std::cout << "[Qwen3Inference] Backend type: " << ryzenai::backendTypeToString(model_.backend_type) << std::endl;
 
     // Ensure the correct device is set for this backend type
-    if (!ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(model_.backend_type)) {
+    if (!ryzenai::mlx::GpuUtils::setMlxDeviceForBackend(model_.backend_type) < 0) {
         throw std::runtime_error("[Qwen3Inference] Failed to set device for backend type: " + std::string(ryzenai::backendTypeToString(model_.backend_type)));
     }
 
