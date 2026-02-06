@@ -15,7 +15,7 @@ permissions:
 jobs:
   build-and-test:
     name: Build and Test RyzenAI Server
-    runs-on: [rai-170-sdk, rai300_400, Windows]
+    runs-on: [rai-170-sdk, Windows]
     steps:
       - uses: actions/checkout@v4
         with:
