@@ -74,12 +74,10 @@ GenerationParams RyzenAIServer::createGenerationParams(int max_tokens, float tem
 void RyzenAIServer::loadModel() {
     std::cout << "[Server] Loading model..." << std::endl;
     std::cout << "[Server] Model path: " << args_.model_path << std::endl;
-    std::cout << "[Server] Execution mode: " << args_.mode << std::endl;
     
     try {
         inference_engine_ = std::make_unique<InferenceEngine>(
-            args_.model_path,
-            args_.mode
+            args_.model_path
         );
         
         model_id_ = extractModelName(args_.model_path);
@@ -143,7 +141,7 @@ void RyzenAIServer::setupRoutes() {
     http_server_->Get("/", [this](const httplib::Request&, httplib::Response& res) {
         json response = {
             {"message", "Ryzen AI LLM Server"},
-            {"version", "1.0.0"},
+            {"version", RYZENAI_SERVER_VERSION},
             {"model", model_id_},
             {"endpoints", {
                 "/health",

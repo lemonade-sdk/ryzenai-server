@@ -26,8 +26,8 @@ import openai
 
 # Model mapping for each execution mode
 MODEL_MAP = {
-    "npu": "amd/Qwen2.5-3B-Instruct-onnx-ryzenai-npu",
-    "hybrid": "amd/Qwen2.5-3B-Instruct-onnx-ryzenai-hybrid",
+    "npu": "amd/Llama-3.2-1B-Instruct-onnx-ryzenai-npu",
+    "hybrid": "amd/Qwen2.5-0.5B-Instruct-onnx-ryzenai-1.7-hybrid",
     "cpu": "amd/Qwen2.5-0.5B-Instruct-quantized_int4-float16-cpu-onnx",
 }
 
@@ -109,8 +109,6 @@ class ServerProcess:
             self.server_exe,
             "-m",
             self.model_path,
-            "--mode",
-            self.mode,
             "--host",
             SERVER_HOST,
             "--port",

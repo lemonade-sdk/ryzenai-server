@@ -13,11 +13,9 @@ namespace ryzenai {
 
 namespace fs = std::filesystem;
 
-InferenceEngine::InferenceEngine(const std::string& model_path, const std::string& mode)
-    : execution_mode_(mode) {
+InferenceEngine::InferenceEngine(const std::string& model_path) {
     
     std::cout << "[InferenceEngine] Initializing with model: " << model_path << std::endl;
-    std::cout << "[InferenceEngine] Execution mode: " << mode << std::endl;
     
     // Resolve model path (handles Hugging Face cache structure)
     model_path_ = resolveModelPath(model_path);
@@ -29,6 +27,10 @@ InferenceEngine::InferenceEngine(const std::string& model_path, const std::strin
     if (!validateModelDirectory(model_path_)) {
         throw std::runtime_error("Invalid model directory: " + model_path_);
     }
+    
+    // Auto-detect execution mode from genai_config.json
+    execution_mode_ = detectExecutionMode();
+    std::cout << "[InferenceEngine] Detected execution mode: " << execution_mode_ << std::endl;
     
     // Detect Ryzen AI version and load config
     loadRaiConfig();
@@ -222,16 +224,10 @@ bool InferenceEngine::validateModelDirectory(const std::string& path) {
 }
 
 std::string InferenceEngine::detectRyzenAIVersion() {
-    // Check for Ryzen AI 1.6.0 installation
-    std::string ryzenai_path_16 = "C:/Program Files/RyzenAI/1.6.0";
-    if (fs::exists(ryzenai_path_16)) {
-        return "1.6.0";
-    }
-    
-    // Check for 1.5.0
-    std::string ryzenai_path_15 = "C:/Program Files/RyzenAI/1.5.0";
-    if (fs::exists(ryzenai_path_15)) {
-        return "1.5.0";
+    // Check for Ryzen AI 1.7.0 installation
+    std::string ryzenai_path_17 = "C:/Program Files/RyzenAI/1.7.0";
+    if (fs::exists(ryzenai_path_17)) {
+        return "1.7.0";
     }
     
     // Check environment variable
@@ -240,8 +236,66 @@ std::string InferenceEngine::detectRyzenAIVersion() {
         return std::string(version_env);
     }
     
-    // Default to 1.6.0
-    return "1.6.0";
+    // Default to 1.7.0
+    return "1.7.0";
+}
+
+std::string InferenceEngine::detectExecutionMode() {
+    // Auto-detect execution mode from genai_config.json by inspecting
+    // session_options in model.decoder. The key indicators are:
+    //
+    // NPU:    "hybrid_opt_token_backend": "npu" in either config_entries
+    //         or provider_options[].RyzenAI
+    // Hybrid: provider_options[].RyzenAI exists (without token_backend=npu)
+    // CPU:    empty provider_options, no config_entries
+    
+    std::string config_path = model_path_ + "/genai_config.json";
+    if (!fs::exists(config_path)) {
+        std::cout << "[InferenceEngine] No genai_config.json found, defaulting to cpu mode" << std::endl;
+        return "cpu";
+    }
+    
+    try {
+        std::ifstream file(config_path);
+        json config = json::parse(file);
+        
+        auto& session_opts = config["model"]["decoder"]["session_options"];
+        
+        // Check config_entries for hybrid_opt_token_backend == "npu"
+        if (session_opts.contains("config_entries")) {
+            auto& entries = session_opts["config_entries"];
+            if (entries.contains("hybrid_opt_token_backend") &&
+                entries["hybrid_opt_token_backend"] == "npu") {
+                return "npu";
+            }
+        }
+        
+        // Check provider_options for RyzenAI configuration
+        if (session_opts.contains("provider_options") && 
+            session_opts["provider_options"].is_array()) {
+            for (const auto& provider : session_opts["provider_options"]) {
+                if (provider.contains("RyzenAI")) {
+                    auto& ryzenai = provider["RyzenAI"];
+                    // If RyzenAI has hybrid_opt_token_backend == "npu", it's NPU
+                    if (ryzenai.contains("hybrid_opt_token_backend") &&
+                        ryzenai["hybrid_opt_token_backend"] == "npu") {
+                        return "npu";
+                    }
+                    // Otherwise RyzenAI provider present means hybrid
+                    return "hybrid";
+                }
+            }
+        }
+        
+        // No RyzenAI provider, no NPU config_entries → CPU
+        return "cpu";
+        
+    } catch (const std::exception& e) {
+        std::cerr << "[WARNING] Failed to detect execution mode from genai_config.json: " 
+                  << e.what() << std::endl;
+        std::cerr << "[WARNING] Defaulting to cpu mode" << std::endl;
+        return "cpu";
+    }
 }
 
 void InferenceEngine::loadRaiConfig() {
