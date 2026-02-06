@@ -24,9 +24,8 @@ This server enables running Large Language Models on AMD Ryzen AI 300-series pro
 - Windows 11 (64-bit)
 - Visual Studio 2022
 - CMake 3.20 or higher
-- **Ryzen AI Software 1.6.0** with LLM patch
-  - Base installation must be at `C:\Program Files\RyzenAI\1.6.0`
-  - LLM patch must be applied on top of base installation
+- **Ryzen AI Software 1.7.0**
+  - Default installation path: `C:\Program Files\RyzenAI\1.7.0`
   - Download from: https://ryzenai.docs.amd.com
 
 **Hardware Requirements:**
@@ -67,7 +66,7 @@ All necessary Ryzen AI DLLs are automatically copied to the output directory dur
 If Ryzen AI is installed in a custom location:
 
 ```cmd
-cmake .. -G "Visual Studio 17 2022" -A x64 -DOGA_ROOT="C:\custom\path\to\RyzenAI\1.6.0"
+cmake .. -G "Visual Studio 17 2022" -A x64 -DOGA_ROOT="C:\custom\path\to\RyzenAI\1.7.0"
 ```
 
 ## Code Structure
@@ -206,7 +205,7 @@ Returns server status and Ryzen AI-specific information:
   "model": "phi-3-mini-4k-instruct",
   "execution_mode": "hybrid",
   "max_prompt_length": 4096,
-  "ryzenai_version": "1.6.0"
+  "ryzenai_version": "1.7.0"
 }
 ```
 
@@ -269,7 +268,7 @@ print(response.choices[0].message.content)
 
 **Check:**
 1. Model path is correct and contains required ONNX files
-2. Ryzen AI 1.6.0 is installed at the correct path
+2. Ryzen AI 1.7.0 is installed at the correct path
 3. NPU drivers are up to date (Windows Update)
 4. Model is compatible with your Ryzen AI version
 
@@ -278,7 +277,7 @@ print(response.choices[0].message.content)
 All required DLLs should be automatically copied during build. If you get DLL errors:
 1. Verify Ryzen AI is installed correctly
 2. Rebuild with `cmake --build . --config Release`
-3. Manually copy DLLs from `C:\Program Files\RyzenAI\1.6.0\deployment\` to the executable directory
+3. Manually copy DLLs from `C:\Program Files\RyzenAI\1.7.0\deployment\` to the executable directory
 
 ### Port Already in Use
 

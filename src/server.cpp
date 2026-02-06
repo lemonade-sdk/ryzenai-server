@@ -143,7 +143,7 @@ void RyzenAIServer::setupRoutes() {
     http_server_->Get("/", [this](const httplib::Request&, httplib::Response& res) {
         json response = {
             {"message", "Ryzen AI LLM Server"},
-            {"version", "1.0.0"},
+            {"version", RYZENAI_SERVER_VERSION},
             {"model", model_id_},
             {"endpoints", {
                 "/health",

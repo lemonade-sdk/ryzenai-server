@@ -222,16 +222,10 @@ bool InferenceEngine::validateModelDirectory(const std::string& path) {
 }
 
 std::string InferenceEngine::detectRyzenAIVersion() {
-    // Check for Ryzen AI 1.6.0 installation
-    std::string ryzenai_path_16 = "C:/Program Files/RyzenAI/1.6.0";
-    if (fs::exists(ryzenai_path_16)) {
-        return "1.6.0";
-    }
-    
-    // Check for 1.5.0
-    std::string ryzenai_path_15 = "C:/Program Files/RyzenAI/1.5.0";
-    if (fs::exists(ryzenai_path_15)) {
-        return "1.5.0";
+    // Check for Ryzen AI 1.7.0 installation
+    std::string ryzenai_path_17 = "C:/Program Files/RyzenAI/1.7.0";
+    if (fs::exists(ryzenai_path_17)) {
+        return "1.7.0";
     }
     
     // Check environment variable
@@ -240,8 +234,8 @@ std::string InferenceEngine::detectRyzenAIVersion() {
         return std::string(version_env);
     }
     
-    // Default to 1.6.0
-    return "1.6.0";
+    // Default to 1.7.0
+    return "1.7.0";
 }
 
 void InferenceEngine::loadRaiConfig() {

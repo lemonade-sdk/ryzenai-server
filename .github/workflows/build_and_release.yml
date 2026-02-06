@@ -15,7 +15,7 @@ permissions:
 jobs:
   build-ryzenai-server:
     name: Build RyzenAI Server
-    runs-on: [rai-160-sdk, Windows]
+    runs-on: [rai-170-sdk, Windows]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,7 +75,7 @@ jobs:
           mkdir build
           cd build
           
-          # Configure - Ryzen AI should be at C:\Program Files\RyzenAI\1.6.0
+          # Configure - Ryzen AI should be at C:\Program Files\RyzenAI\1.7.0
           cmake .. -G "Visual Studio 17 2022" -A x64
           if ($LASTEXITCODE -ne 0) { 
               Write-Host "ERROR: CMake configuration failed!" -ForegroundColor Red
@@ -180,8 +180,8 @@ jobs:
           
           # Model mapping based on mode
           $modelMap = @{
-              "npu" = "amd/Qwen2.5-3B-Instruct-onnx-ryzenai-npu"
-              "hybrid" = "amd/Qwen2.5-3B-Instruct-onnx-ryzenai-hybrid"
+              "npu" = "amd/Llama-3.2-1B-Instruct-onnx-ryzenai-npu"
+              "hybrid" = "amd/Qwen2.5-0.5B-Instruct-onnx-ryzenai-1.7-hybrid"
               "cpu" = "amd/Qwen2.5-0.5B-Instruct-quantized_int4-float16-cpu-onnx"
           }
           
@@ -295,7 +295,7 @@ jobs:
             
             - Windows 11 (64-bit)
             - AMD Ryzen AI 300-series processor
-            - Ryzen AI Software 1.6.0 with LLM patch
+            - Ryzen AI Software 1.7.0
             
             ### Usage
             

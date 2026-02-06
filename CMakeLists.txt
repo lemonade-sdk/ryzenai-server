@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ryzenai-server VERSION 1.0.2 LANGUAGES CXX)
+project(ryzenai-server VERSION 1.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,10 +17,10 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 find_package(Threads REQUIRED)
 
 # ONNX Runtime GenAI
-set(OGA_ROOT "C:/Program Files/RyzenAI/1.6.0" CACHE PATH "Path to Ryzen AI installation")
+set(OGA_ROOT "C:/Program Files/RyzenAI/1.7.0" CACHE PATH "Path to Ryzen AI installation")
 
 if(NOT EXISTS ${OGA_ROOT})
-    message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.6.0 or set OGA_ROOT")
+    message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.7.0 or set OGA_ROOT")
 endif()
 
 message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
@@ -95,8 +95,11 @@ target_link_libraries(ryzenai-server PRIVATE
     Threads::Threads
 )
 
-# Enable multi-threading for cpp-httplib
-target_compile_definitions(ryzenai-server PRIVATE CPPHTTPLIB_THREAD_POOL_COUNT=8)
+# Pass version info from CMake to C++ as compile definitions
+target_compile_definitions(ryzenai-server PRIVATE
+    CPPHTTPLIB_THREAD_POOL_COUNT=8
+    RYZENAI_SERVER_VERSION="${PROJECT_VERSION}"
+)
 
 # Windows-specific settings
 if(WIN32)
@@ -110,13 +113,15 @@ if(WIN32)
         "${OGA_ROOT}/deployment/onnxruntime.dll"
         "${OGA_ROOT}/deployment/onnxruntime_providers_shared.dll"
         "${OGA_ROOT}/deployment/onnxruntime_providers_vitisai.dll"
+        "${OGA_ROOT}/deployment/onnxruntime_providers_ryzenai.dll"
         "${OGA_ROOT}/deployment/onnxruntime_vitisai_ep.dll"
         "${OGA_ROOT}/deployment/onnxruntime_vitis_ai_custom_ops.dll"
         "${OGA_ROOT}/deployment/onnx_custom_ops.dll"
-        "${OGA_ROOT}/deployment/abseil_dll.dll"
-        "${OGA_ROOT}/deployment/libutf8_validity.dll"
         "${OGA_ROOT}/deployment/dyn_dispatch_core.dll"
         "${OGA_ROOT}/deployment/DirectML.dll"
+        "${OGA_ROOT}/deployment/D3D12Core.dll"
+        "${OGA_ROOT}/deployment/flexmlrt.dll"
+        "${OGA_ROOT}/deployment/cert_dtrace.dll"
         "${OGA_ROOT}/deployment/zlib.dll"
         "${OGA_ROOT}/deployment/zstd.dll"
         "${OGA_ROOT}/deployment/ryzenai_onnx_utils.dll"
