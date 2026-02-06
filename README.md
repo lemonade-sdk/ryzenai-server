@@ -132,7 +132,7 @@ ryzenai-server/
 
 **Inference Engine:** Wraps ONNX Runtime GenAI API, managing model loading, generation parameters, and streaming callbacks. Applies chat templates and handles tool call extraction.
 
-**Execution Providers:** Supports three modes:
+**Execution Providers:** Supports three modes (auto-detected from model config):
 - **Hybrid**: NPU + iGPU
 - **NPU**: Pure NPU execution
 - **CPU**: CPU-only fallback
@@ -152,14 +152,11 @@ These dependencies must be manually installed by the developer:
 ### Starting the Server
 
 ```cmd
-# Specify NPU mode
-ryzenai-server.exe -m C:\path\to\onnx\model --mode npu
+# Start the server (execution mode is auto-detected from the model)
+ryzenai-server.exe -m C:\path\to\onnx\model
 
-# Hybrid mode with custom port
-ryzenai-server.exe -m C:\path\to\onnx\model --mode hybrid --port 8081
-
-# CPU mode
-ryzenai-server.exe -m C:\path\to\onnx\model --mode cpu
+# Custom port
+ryzenai-server.exe -m C:\path\to\onnx\model --port 8081
 
 # Verbose logging
 ryzenai-server.exe -m C:\path\to\onnx\model --verbose
@@ -170,11 +167,12 @@ ryzenai-server.exe -m C:\path\to\onnx\model --verbose
 - `-m, --model PATH` - Path to ONNX model directory (required)
 - `--host ADDRESS` - Server host address (default: 127.0.0.1)
 - `-p, --port PORT` - Server port (default: 8080)
-- `--mode MODE` - Execution mode: npu, hybrid, cpu (default: hybrid)
 - `-c, --ctx-size SIZE` - Context size in tokens (default: 2048)
 - `-t, --threads NUM` - Number of CPU threads (default: 4)
 - `-v, --verbose` - Enable verbose logging
 - `-h, --help` - Show help message
+
+The execution mode (NPU, Hybrid, or CPU) is automatically detected from the model's `genai_config.json` configuration.
 
 ### Model Requirements
 

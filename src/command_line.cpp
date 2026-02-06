@@ -31,17 +31,6 @@ CommandLineArgs CommandLineParser::parse(int argc, char* argv[]) {
                 throw std::runtime_error("Missing value for --port");
             }
         }
-        else if (arg == "--mode") {
-            if (i + 1 < argc) {
-                args.mode = argv[++i];
-                // Validate mode
-                if (args.mode != "npu" && args.mode != "hybrid" && args.mode != "cpu") {
-                    throw std::runtime_error("Invalid mode: " + args.mode + " (must be npu, hybrid, or cpu)");
-                }
-            } else {
-                throw std::runtime_error("Missing value for --mode");
-            }
-        }
         else if (arg == "--ctx-size" || arg == "-c") {
             if (i + 1 < argc) {
                 args.ctx_size = std::stoi(argv[++i]);
@@ -74,20 +63,21 @@ CommandLineArgs CommandLineParser::parse(int argc, char* argv[]) {
 void CommandLineParser::printUsage(const char* program_name) {
     std::cout << "Ryzen AI LLM Server - OpenAI API compatible server for NPU/Hybrid/CPU execution\n\n";
     std::cout << "Usage: " << program_name << " -m MODEL_PATH [OPTIONS]\n\n";
+    std::cout << "The execution mode (NPU, Hybrid, or CPU) is auto-detected from the model's\n";
+    std::cout << "genai_config.json configuration.\n\n";
     std::cout << "Required Arguments:\n";
     std::cout << "  -m, --model PATH          Path to ONNX model directory\n\n";
     std::cout << "Optional Arguments:\n";
     std::cout << "  --host HOST               Host to bind to (default: 127.0.0.1)\n";
     std::cout << "  -p, --port PORT           Port to listen on (default: 8080)\n";
-    std::cout << "  --mode MODE               Execution mode: npu|hybrid|cpu (default: hybrid)\n";
     std::cout << "  -c, --ctx-size SIZE       Context size (default: 2048)\n";
     std::cout << "  -t, --threads NUM         Number of threads (default: 4)\n";
     std::cout << "  -v, --verbose             Enable verbose output\n";
     std::cout << "  -h, --help                Show this help message\n\n";
     std::cout << "Examples:\n";
     std::cout << "  " << program_name << " -m C:\\models\\phi-3-mini-4k-instruct-onnx\n";
-    std::cout << "  " << program_name << " -m C:\\models\\llama-2-7b-onnx --mode hybrid --port 8081\n";
-    std::cout << "  " << program_name << " -m C:\\models\\qwen-onnx --mode npu --verbose\n\n";
+    std::cout << "  " << program_name << " -m C:\\models\\llama-2-7b-onnx --port 8081\n";
+    std::cout << "  " << program_name << " -m C:\\models\\qwen-onnx --verbose\n\n";
     std::cout << "For more information, visit: https://ryzenai.docs.amd.com\n";
 }
 

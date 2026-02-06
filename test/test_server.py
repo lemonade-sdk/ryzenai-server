@@ -109,8 +109,6 @@ class ServerProcess:
             self.server_exe,
             "-m",
             self.model_path,
-            "--mode",
-            self.mode,
             "--host",
             SERVER_HOST,
             "--port",

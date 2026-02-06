@@ -25,7 +25,7 @@ struct CompletionTimingData {
 
 class InferenceEngine {
 public:
-    InferenceEngine(const std::string& model_path, const std::string& mode);
+    InferenceEngine(const std::string& model_path);
     ~InferenceEngine();
     
     // Synchronous completion
@@ -57,6 +57,7 @@ private:
     void setupExecutionProvider();
     void loadRaiConfig();
     std::string detectRyzenAIVersion();
+    std::string detectExecutionMode();
     std::string resolveModelPath(const std::string& path);
     std::vector<int32_t> truncatePrompt(const std::vector<int32_t>& input_ids);
     bool validateModelDirectory(const std::string& path);
