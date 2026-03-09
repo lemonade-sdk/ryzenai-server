@@ -17,7 +17,22 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 find_package(Threads REQUIRED)
 
 # ONNX Runtime GenAI
-set(OGA_ROOT "C:/Program Files/RyzenAI/1.7.0" CACHE PATH "Path to Ryzen AI installation")
+# Priority order: RYZENAI_INSTALL_PATH env var > -DOGA_ROOT > platform default
+if(DEFINED ENV{RYZENAI_INSTALL_PATH})
+    set(OGA_ROOT_DEFAULT "$ENV{RYZENAI_INSTALL_PATH}")
+    message(STATUS "Using RYZENAI_INSTALL_PATH from environment: ${OGA_ROOT_DEFAULT}")
+    # Force override cached value if environment variable is set
+    set(OGA_ROOT "$ENV{RYZENAI_INSTALL_PATH}" CACHE PATH "Path to Ryzen AI installation" FORCE)
+elseif(WIN32)
+    set(OGA_ROOT_DEFAULT "C:/Program Files/RyzenAI/1.7.0")
+    set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
+elseif(UNIX AND NOT APPLE)
+    set(OGA_ROOT_DEFAULT "/opt/ryzenai/1.7.0")
+    set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
+else()
+    set(OGA_ROOT_DEFAULT "/opt/ryzenai/1.7.0")
+    set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
+endif()
 
 if(NOT EXISTS ${OGA_ROOT})
     message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.7.0 or set OGA_ROOT")
@@ -26,8 +41,8 @@ endif()
 message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
 
 # Find ONNX Runtime GenAI library (it's in LLM subfolder)
-find_library(OGA_LIB 
-    NAMES onnxruntime-genai
+find_library(OGA_LIB
+    NAMES onnxruntime-genai libonnxruntime-genai
     PATHS ${OGA_ROOT}/LLM/lib
     REQUIRED
 )
@@ -147,6 +162,47 @@ if(WIN32)
         endif()
     endforeach()
     
+    # Copy AMD_LICENSE to output directory
+    add_custom_command(TARGET ryzenai-server POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/AMD_LICENSE
+        $<TARGET_FILE_DIR:ryzenai-server>/AMD_LICENSE
+        COMMENT "Copying AMD_LICENSE"
+    )
+elseif(UNIX AND NOT APPLE)
+    # Linux-specific settings
+    # Link required libraries for threading and other POSIX features
+    target_link_libraries(ryzenai-server PRIVATE dl)
+
+    # Copy required .so files to output directory (they're in deployment folder)
+    # Only include libraries that are commonly available in Ryzen AI deployments
+    set(REQUIRED_LIBS
+        "${OGA_ROOT}/deployment/libonnxruntime-genai.so"
+        "${OGA_ROOT}/deployment/libonnxruntime.so"
+        "${OGA_ROOT}/deployment/libonnxruntime_providers_ryzenai.so"
+        "${OGA_ROOT}/deployment/libonnx_custom_ops.so"
+        "${OGA_ROOT}/deployment/libryzen_mm.so"
+    )
+
+    # Set RPATH so libraries can be found at runtime without LD_LIBRARY_PATH
+    set_target_properties(ryzenai-server PROPERTIES
+        BUILD_RPATH "${OGA_ROOT}/deployment;$ORIGIN"
+        INSTALL_RPATH "${OGA_ROOT}/deployment;$ORIGIN"
+    )
+
+    foreach(LIB ${REQUIRED_LIBS})
+        if(EXISTS ${LIB})
+            add_custom_command(TARGET ryzenai-server POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${LIB}
+                $<TARGET_FILE_DIR:ryzenai-server>
+                COMMENT "Copying ${LIB}"
+            )
+        else()
+            message(WARNING "Library not found: ${LIB}")
+        endif()
+    endforeach()
+
     # Copy AMD_LICENSE to output directory
     add_custom_command(TARGET ryzenai-server POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
