@@ -347,18 +347,35 @@ void InferenceEngine::loadModel() {
         // Create tokenizer using factory method
         tokenizer_ = OgaTokenizer::Create(*model_);
         
-        // Load chat template from tokenizer_config.json
-        std::string tokenizer_config_path = model_path_ + "/tokenizer_config.json";
-        if (fs::exists(tokenizer_config_path)) {
+        // Load chat template - prefer chat_template.jinja file over tokenizer_config.json
+        // (matches the Python reference implementation in model_chat.py)
+        std::string jinja_path = model_path_ + "/chat_template.jinja";
+        if (fs::exists(jinja_path)) {
             try {
-                std::ifstream file(tokenizer_config_path);
-                json config = json::parse(file);
-                if (config.contains("chat_template") && config["chat_template"].is_string()) {
-                    chat_template_ = config["chat_template"];
-                    std::cout << "[InferenceEngine] Loaded chat template from tokenizer_config.json" << std::endl;
-                }
+                std::ifstream file(jinja_path);
+                std::ostringstream ss;
+                ss << file.rdbuf();
+                chat_template_ = ss.str();
+                std::cout << "[InferenceEngine] Loaded chat template from chat_template.jinja" << std::endl;
             } catch (const std::exception& e) {
-                std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
+                std::cerr << "[WARNING] Failed to load chat_template.jinja: " << e.what() << std::endl;
+            }
+        }
+
+        // Fall back to tokenizer_config.json if no jinja file found
+        if (chat_template_.empty()) {
+            std::string tokenizer_config_path = model_path_ + "/tokenizer_config.json";
+            if (fs::exists(tokenizer_config_path)) {
+                try {
+                    std::ifstream file(tokenizer_config_path);
+                    json config = json::parse(file);
+                    if (config.contains("chat_template") && config["chat_template"].is_string()) {
+                        chat_template_ = config["chat_template"];
+                        std::cout << "[InferenceEngine] Loaded chat template from tokenizer_config.json" << std::endl;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
+                }
             }
         }
         
