@@ -75,9 +75,15 @@ void CommandLineParser::printUsage(const char* program_name) {
     std::cout << "  -v, --verbose             Enable verbose output\n";
     std::cout << "  -h, --help                Show this help message\n\n";
     std::cout << "Examples:\n";
+#ifdef _WIN32
     std::cout << "  " << program_name << " -m C:\\models\\phi-3-mini-4k-instruct-onnx\n";
     std::cout << "  " << program_name << " -m C:\\models\\llama-2-7b-onnx --port 8081\n";
     std::cout << "  " << program_name << " -m C:\\models\\qwen-onnx --verbose\n\n";
+#else
+    std::cout << "  " << program_name << " -m /opt/models/phi-3-mini-4k-instruct-onnx\n";
+    std::cout << "  " << program_name << " -m ~/.cache/huggingface/hub/models--Qwen--Qwen-1.8B/snapshots/<hash> --port 8081\n";
+    std::cout << "  " << program_name << " -m /home/user/models/llama-2-7b-onnx --verbose\n\n";
+#endif
     std::cout << "For more information, visit: https://ryzenai.docs.amd.com\n";
 }
 

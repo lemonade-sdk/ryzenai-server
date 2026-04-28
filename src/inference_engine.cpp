@@ -224,19 +224,43 @@ bool InferenceEngine::validateModelDirectory(const std::string& path) {
 }
 
 std::string InferenceEngine::detectRyzenAIVersion() {
-    // Check for Ryzen AI 1.7.0 installation
-    std::string ryzenai_path_17 = "C:/Program Files/RyzenAI/1.7.0";
-    if (fs::exists(ryzenai_path_17)) {
-        return "1.7.0";
-    }
-    
-    // Check environment variable
+    // Priority 1: Check RYZENAI_VERSION environment variable directly
     const char* version_env = std::getenv("RYZENAI_VERSION");
     if (version_env) {
         return std::string(version_env);
     }
-    
-    // Default to 1.7.0
+
+    // Priority 2: Check RYZENAI_INSTALL_PATH environment variable and extract version
+    const char* install_path_env = std::getenv("RYZENAI_INSTALL_PATH");
+    if (install_path_env) {
+        std::string path_str(install_path_env);
+        // Remove trailing slashes
+        while (!path_str.empty() && (path_str.back() == '/' || path_str.back() == '\\')) {
+            path_str.pop_back();
+        }
+        // Extract version from path (e.g., "/opt/ryzenai/1.7.0" -> "1.7.0")
+        size_t last_slash = path_str.find_last_of("/\\");
+        if (last_slash != std::string::npos) {
+            std::string version = path_str.substr(last_slash + 1);
+            // Validate it looks like a version number: starts with digit and contains a dot
+            if (!version.empty() && std::isdigit(version[0]) && version.find('.') != std::string::npos) {
+                return version;
+            }
+        }
+    }
+
+    // Priority 3: Check platform-specific default paths
+#ifdef _WIN32
+    std::string ryzenai_path_17 = "C:/Program Files/RyzenAI/1.7.0";
+#else
+    std::string ryzenai_path_17 = "/opt/ryzenai/1.7.0";
+#endif
+
+    if (fs::exists(ryzenai_path_17)) {
+        return "1.7.0";
+    }
+
+    // Default fallback
     return "1.7.0";
 }
 

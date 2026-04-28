@@ -32,7 +32,7 @@ This server enables running Large Language Models on AMD Ryzen AI 300-series pro
 - AMD Ryzen AI 300- or 400-series processor (for NPU execution)
 - Minimum 16GB RAM (32GB recommended for larger models)
 
-### Build Steps
+### Build Steps (Windows)
 
 ```cmd
 # Clone the repository
@@ -50,24 +50,80 @@ cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
 
+### Build Steps (Linux)
+
+**Linux Requirements:**
+- Ubuntu 22.04+ or equivalent Linux distribution
+- GCC 9+ or Clang 10+
+- CMake 3.20 or higher
+- **Ryzen AI Software 1.7.0 for Linux**
+  - Default installation path: `/opt/ryzenai/1.7.0`
+  - Download from: https://ryzenai.docs.amd.com
+
+```bash
+# Clone the repository
+git clone https://github.com/lemonade-sdk/ryzenai-server.git
+cd ryzenai-server
+
+# Create and enter build directory
+mkdir build
+cd build
+
+# Configure with CMake
+cmake .. -DCMAKE_BUILD_TYPE=Release
+
+# Build
+cmake --build .
+```
+
 ### Build Output
 
-The executable and required DLLs will be created at:
+**Windows:** The executable and required DLLs will be created at:
 ```
 build\bin\Release\ryzenai-server.exe
 ```
 
-All necessary Ryzen AI DLLs are automatically copied to the output directory during build.
+**Linux:** The executable and required shared libraries will be created at:
+```
+build/bin/ryzenai-server
+```
 
-**Note:** The Ryzen AI DLLs included in the release are licensed under the AMD Software End User License Agreement. See `AMD_LICENSE` in the release package for full terms.
+All necessary Ryzen AI libraries (DLLs on Windows, .so files on Linux) are automatically copied to the output directory during build.
+
+**Note:** The Ryzen AI libraries included in the release are licensed under the AMD Software End User License Agreement. See `AMD_LICENSE` in the release package for full terms.
 
 ### Custom Ryzen AI Installation Path
 
-If Ryzen AI is installed in a custom location:
+If Ryzen AI is installed in a custom location, you can specify it using either an environment variable (recommended) or a CMake option.
 
-```cmd
-cmake .. -G "Visual Studio 17 2022" -A x64 -DOGA_ROOT="C:\custom\path\to\RyzenAI\1.7.0"
+**Option 1: Environment Variable (works for both build and runtime)**
+
+```bash
+# Linux/macOS
+export RYZENAI_INSTALL_PATH=/custom/path/ryzenai/1.7.0
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build .
+
+# Windows (PowerShell)
+$env:RYZENAI_INSTALL_PATH="C:\custom\path\RyzenAI\1.7.0"
+cmake .. -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
 ```
+
+**Option 2: CMake Option (build-time only)**
+
+```bash
+# Linux
+cmake .. -DCMAKE_BUILD_TYPE=Release -DOGA_ROOT=/custom/path/ryzenai/1.7.0
+
+# Windows
+cmake .. -G "Visual Studio 17 2022" -A x64 -DOGA_ROOT="C:\custom\path\RyzenAI\1.7.0"
+```
+
+**Priority Order:**
+1. `RYZENAI_INSTALL_PATH` environment variable (highest priority)
+2. `-DOGA_ROOT` CMake cache variable
+3. Platform-specific defaults (`C:/Program Files/RyzenAI/1.7.0` on Windows, `/opt/ryzenai/1.7.0` on Linux)
 
 ## Code Structure
 
@@ -151,6 +207,7 @@ These dependencies must be manually installed by the developer:
 
 ### Starting the Server
 
+**Windows:**
 ```cmd
 # Start the server (execution mode is auto-detected from the model)
 ryzenai-server.exe -m C:\path\to\onnx\model
@@ -160,6 +217,22 @@ ryzenai-server.exe -m C:\path\to\onnx\model --port 8081
 
 # Verbose logging
 ryzenai-server.exe -m C:\path\to\onnx\model --verbose
+```
+
+**Linux:**
+```bash
+# Start the server (execution mode is auto-detected from the model)
+./ryzenai-server -m /opt/models/phi-3-mini-4k-instruct-onnx
+
+# With custom Ryzen AI installation path
+export RYZENAI_INSTALL_PATH=/custom/ryzenai/1.7.0
+./ryzenai-server -m /opt/models/phi-3-mini-4k-instruct-onnx
+
+# Custom port
+./ryzenai-server -m /opt/models/phi-3-mini-4k-instruct-onnx --port 8081
+
+# Verbose logging
+./ryzenai-server -m /opt/models/phi-3-mini-4k-instruct-onnx --verbose
 ```
 
 ### Command-Line Arguments
@@ -182,8 +255,15 @@ Models must be in ONNX format compatible with Ryzen AI. Required files:
 - Tokenizer files (`tokenizer.json`, `tokenizer_config.json`, etc.)
 
 Models are typically cached in:
+
+**Windows:**
 ```
 C:\Users\<Username>\.cache\huggingface\hub\
+```
+
+**Linux:**
+```
+~/.cache/huggingface/hub/
 ```
 
 ## API Endpoints
@@ -220,6 +300,7 @@ All endpoints support both streaming and non-streaming modes. The server applies
 
 ### Quick Test
 
+**Windows:**
 ```cmd
 # Start the server
 cd build\bin\Release
@@ -232,6 +313,21 @@ curl http://localhost:8080/health
 curl http://localhost:8080/v1/chat/completions ^
   -H "Content-Type: application/json" ^
   -d "{\"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}], \"max_tokens\": 50}"
+```
+
+**Linux:**
+```bash
+# Start the server
+cd build/bin
+./ryzenai-server -m /path/to/model --verbose
+
+# Test health endpoint (in another terminal)
+curl http://localhost:8080/health
+
+# Test chat completion
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 50}'
 ```
 
 ## Integration with Lemonade Server
@@ -280,8 +376,35 @@ All required DLLs should be automatically copied during build. If you get DLL er
 ### Port Already in Use
 
 If port 8080 is occupied:
+
+**Windows:**
 ```cmd
 ryzenai-server.exe -m C:\path\to\model --port 8081
+```
+
+**Linux:**
+```bash
+./ryzenai-server -m /path/to/model --port 8081
+```
+
+### Linux-Specific Notes
+
+**Driver Detection:**
+On Linux, NPU driver detection is informational only. If the driver cannot be detected, the server will print a warning but continue startup. This is expected behavior as Linux driver interfaces may vary.
+
+**Library Loading:**
+The build system automatically copies required Ryzen AI libraries next to the executable and configures RPATH to search the executable's directory (`$ORIGIN`). This means:
+- No `LD_LIBRARY_PATH` setup required
+- The binary is relocatable - works from any directory
+- To use a different Ryzen AI version, rebuild with the appropriate `RYZENAI_INSTALL_PATH` or `OGA_ROOT`
+
+**Running from Different Directories:**
+Because RPATH is configured, you can run the server from any directory:
+```bash
+# These all work
+./build/bin/ryzenai-server -m /path/to/model
+cd build/bin && ./ryzenai-server -m /path/to/model
+/full/path/to/ryzenai-server -m /path/to/model
 ```
 
 ## Development
@@ -297,15 +420,20 @@ ryzenai-server.exe -m C:\path\to\model --port 8081
 
 ### Building for Development
 
-Debug build with symbols:
+**Windows:**
 ```cmd
 cmake --build . --config Debug
 ```
 
-Debug executable location:
+Debug executable location: `build\bin\Debug\ryzenai-server.exe`
+
+**Linux:**
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake --build .
 ```
-build\bin\Debug\ryzenai-server.exe
-```
+
+Debug executable location: `build/bin/ryzenai-server`
 
 ### Known Issues
 

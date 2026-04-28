@@ -116,10 +116,12 @@ void OpenBrowser(const std::string& url) {
 
 #else
 
-std::string GetNPUDriverVersion() { return "0.0.0.0"; }
-void OpenBrowser(const std::string& url) { 
-    std::cout << "Please visit: " << url << std::endl;
+// Non-Windows platforms: NPU driver check not supported
+std::string GetNPUDriverVersion() {
+    return "";
 }
+
+void OpenBrowser([[maybe_unused]] const std::string& url) {}
 
 #endif
 
