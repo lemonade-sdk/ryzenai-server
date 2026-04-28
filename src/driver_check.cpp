@@ -116,11 +116,12 @@ void OpenBrowser(const std::string& url) {
 
 #else
 
-static inline std::string GetNPUDriverVersion() {
+// Non-Windows platforms: NPU driver check not supported
+std::string GetNPUDriverVersion() {
     return "";
 }
 
-static inline void OpenBrowser(const std::string& _url) {}
+void OpenBrowser([[maybe_unused]] const std::string& url) {}
 
 #endif
 

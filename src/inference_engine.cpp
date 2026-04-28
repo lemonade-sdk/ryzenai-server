@@ -224,25 +224,29 @@ bool InferenceEngine::validateModelDirectory(const std::string& path) {
 }
 
 std::string InferenceEngine::detectRyzenAIVersion() {
-    // Priority 1: Check RYZENAI_INSTALL_PATH environment variable and extract version
+    // Priority 1: Check RYZENAI_VERSION environment variable directly
+    const char* version_env = std::getenv("RYZENAI_VERSION");
+    if (version_env) {
+        return std::string(version_env);
+    }
+
+    // Priority 2: Check RYZENAI_INSTALL_PATH environment variable and extract version
     const char* install_path_env = std::getenv("RYZENAI_INSTALL_PATH");
     if (install_path_env) {
         std::string path_str(install_path_env);
+        // Remove trailing slashes
+        while (!path_str.empty() && (path_str.back() == '/' || path_str.back() == '\\')) {
+            path_str.pop_back();
+        }
         // Extract version from path (e.g., "/opt/ryzenai/1.7.0" -> "1.7.0")
         size_t last_slash = path_str.find_last_of("/\\");
         if (last_slash != std::string::npos) {
             std::string version = path_str.substr(last_slash + 1);
-            // Validate it looks like a version number (contains a dot)
-            if (version.find('.') != std::string::npos) {
+            // Validate it looks like a version number: starts with digit and contains a dot
+            if (!version.empty() && std::isdigit(version[0]) && version.find('.') != std::string::npos) {
                 return version;
             }
         }
-    }
-
-    // Priority 2: Check RYZENAI_VERSION environment variable directly
-    const char* version_env = std::getenv("RYZENAI_VERSION");
-    if (version_env) {
-        return std::string(version_env);
     }
 
     // Priority 3: Check platform-specific default paths

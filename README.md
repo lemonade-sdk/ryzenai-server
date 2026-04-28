@@ -393,10 +393,10 @@ ryzenai-server.exe -m C:\path\to\model --port 8081
 On Linux, NPU driver detection is informational only. If the driver cannot be detected, the server will print a warning but continue startup. This is expected behavior as Linux driver interfaces may vary.
 
 **Library Loading:**
-The build system automatically configures RPATH so that the Ryzen AI libraries can be found without setting `LD_LIBRARY_PATH`. Libraries are searched in:
-1. The `RYZENAI_INSTALL_PATH/deployment` directory (if set)
-2. The executable's directory (`$ORIGIN`)
-3. The default `/opt/ryzenai/1.7.0/deployment` directory
+The build system automatically copies required Ryzen AI libraries next to the executable and configures RPATH to search the executable's directory (`$ORIGIN`). This means:
+- No `LD_LIBRARY_PATH` setup required
+- The binary is relocatable - works from any directory
+- To use a different Ryzen AI version, rebuild with the appropriate `RYZENAI_INSTALL_PATH` or `OGA_ROOT`
 
 **Running from Different Directories:**
 Because RPATH is configured, you can run the server from any directory:

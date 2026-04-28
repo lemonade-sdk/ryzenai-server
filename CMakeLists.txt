@@ -21,15 +21,16 @@ find_package(Threads REQUIRED)
 if(DEFINED ENV{RYZENAI_INSTALL_PATH})
     set(OGA_ROOT_DEFAULT "$ENV{RYZENAI_INSTALL_PATH}")
     message(STATUS "Using RYZENAI_INSTALL_PATH from environment: ${OGA_ROOT_DEFAULT}")
+    # Warn if both env var and explicit -DOGA_ROOT are set
+    if(DEFINED OGA_ROOT AND NOT OGA_ROOT STREQUAL "$ENV{RYZENAI_INSTALL_PATH}")
+        message(WARNING "Both RYZENAI_INSTALL_PATH and -DOGA_ROOT are set. Environment variable takes precedence: $ENV{RYZENAI_INSTALL_PATH}")
+    endif()
     # Force override cached value if environment variable is set
     set(OGA_ROOT "$ENV{RYZENAI_INSTALL_PATH}" CACHE PATH "Path to Ryzen AI installation" FORCE)
 elseif(WIN32)
     set(OGA_ROOT_DEFAULT "C:/Program Files/RyzenAI/1.7.0")
     set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
 elseif(UNIX AND NOT APPLE)
-    set(OGA_ROOT_DEFAULT "/opt/ryzenai/1.7.0")
-    set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
-else()
     set(OGA_ROOT_DEFAULT "/opt/ryzenai/1.7.0")
     set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
 endif()
@@ -175,7 +176,11 @@ elseif(UNIX AND NOT APPLE)
     target_link_libraries(ryzenai-server PRIVATE dl)
 
     # Copy required .so files to output directory (they're in deployment folder)
-    # Only include libraries that are commonly available in Ryzen AI deployments
+    # Note: This list is intentionally shorter than Windows (18 DLLs vs 5 .so files).
+    # Many Windows DLLs are platform-specific (DirectML, D3D12Core) or bundled
+    # differently on Linux (zlib, zstd are system libraries). The libraries below
+    # are the core Ryzen AI runtime dependencies required for NPU execution.
+    # Verified via ldd analysis - other dependencies are satisfied by system libs.
     set(REQUIRED_LIBS
         "${OGA_ROOT}/deployment/libonnxruntime-genai.so"
         "${OGA_ROOT}/deployment/libonnxruntime.so"
@@ -184,10 +189,11 @@ elseif(UNIX AND NOT APPLE)
         "${OGA_ROOT}/deployment/libryzen_mm.so"
     )
 
-    # Set RPATH so libraries can be found at runtime without LD_LIBRARY_PATH
+    # Set RPATH to search in executable's directory first
+    # Libraries are copied next to the executable, so $ORIGIN is sufficient
     set_target_properties(ryzenai-server PROPERTIES
-        BUILD_RPATH "${OGA_ROOT}/deployment;$ORIGIN"
-        INSTALL_RPATH "${OGA_ROOT}/deployment;$ORIGIN"
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN"
     )
 
     foreach(LIB ${REQUIRED_LIBS})
