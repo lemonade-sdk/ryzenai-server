@@ -245,6 +245,30 @@ install(TARGETS ryzenai-server
     RUNTIME DESTINATION bin
 )
 
+# ---------------------------------------------------------------------------
+# Tests. tool_calls.cpp has no OGA dependency, so the tool-call suite builds and
+# runs on any machine -- no Ryzen AI install and no NPU hardware required.
+# Keep this file byte-identical with lemonade-sdk/amdgpu-server.
+# ---------------------------------------------------------------------------
+option(BUILD_TESTING "Build the test suite" ON)
+if(BUILD_TESTING)
+    enable_testing()
+
+    add_executable(test_tool_calls
+        test/test_tool_calls.cpp
+        src/tool_calls.cpp
+    )
+    target_include_directories(test_tool_calls PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${JSON_DIR}
+    )
+    if(MSVC)
+        target_compile_options(test_tool_calls PRIVATE /W4)
+    endif()
+
+    add_test(NAME ToolCalls COMMAND test_tool_calls)
+endif()
+
 # Print build information
 message(STATUS "==========================================================")
 message(STATUS "Ryzen AI LLM Server Configuration:")

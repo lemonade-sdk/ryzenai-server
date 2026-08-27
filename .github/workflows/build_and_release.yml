@@ -97,6 +97,13 @@ jobs:
           
           Write-Host "ryzenai-server build successful!" -ForegroundColor Green
 
+      - name: Unit tests
+        shell: PowerShell
+        run: |
+          $ErrorActionPreference = "Stop"
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify RyzenAI Server build
         shell: PowerShell
         run: |
