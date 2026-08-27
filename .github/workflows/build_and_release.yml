@@ -13,6 +13,26 @@ permissions:
   contents: write
 
 jobs:
+  # tool_calls.cpp has no OGA dependency, so the shared tool-call suite runs on a
+  # plain hosted runner -- no Ryzen AI install and no NPU hardware needed.
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch nlohmann/json
+        run: |
+          set -euo pipefail
+          mkdir -p external/json
+          curl -fsSL -o external/json/json.hpp             https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+
+      - name: Build and run tool-call tests
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -Wall -Wextra -Iinclude -Iexternal/json             test/test_tool_calls.cpp src/tool_calls.cpp -o test_tool_calls
+          ./test_tool_calls
+
   build-and-test:
     name: Build and Test RyzenAI Server
     runs-on: [rai-170-sdk, Windows]
