@@ -80,9 +80,8 @@ if(WIN32 AND MEDUSA_BUILD)
             "Then copy onnxruntime-genai.lib into your build directory.")
     endif()
     set(OGA_LIB "${OGA_GENAI_LIB}")
-    # Use RyzenAI 1.7.1 OGA headers — full multimodal API (OgaMultiModalProcessor, OgaImages)
-    # matches the exported C API symbols in the Medusa onnxruntime-genai.dll
-    set(OGA_INCLUDE "C:/Program Files/RyzenAI/1.7.1/LLM/include")
+    # OGA headers matching the Medusa OGA 0.16 DLL — vendored in the repo root
+    set(OGA_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}")
 elseif(WIN32)
     find_library(OGA_LIB
         NAMES onnxruntime-genai
