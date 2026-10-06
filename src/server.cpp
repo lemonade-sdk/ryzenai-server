@@ -529,7 +529,15 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             return;
         }
         
-        // Convert messages to JSON array for chat template
+        // Collect all images from messages (multimodal)
+        std::vector<ryzenai::ImageContent> all_images;
+        for (const auto& msg : chat_req.messages) {
+            for (const auto& img : msg.images) {
+                all_images.push_back(img);
+            }
+        }
+
+        // Convert messages to JSON array for chat template (text only)
         json messages_array = json::array();
         for (const auto& msg : chat_req.messages) {
             messages_array.push_back({
@@ -537,11 +545,14 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                 {"content", msg.content}
             });
         }
-        
+
         // Apply the model's chat template (with tools if provided)
         std::string tools_json = chat_req.tools.empty() ? "" : chat_req.tools.dump();
-        
+
         std::cout << "[Server] Chat completion request (stream=" << chat_req.stream;
+        if (!all_images.empty()) {
+            std::cout << ", images=" << all_images.size();
+        }
         if (!tools_json.empty()) {
             std::cout << ", with " << chat_req.tools.size() << " tools";
             std::cout << ")" << std::endl;
@@ -549,8 +560,19 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
         } else {
             std::cout << ")" << std::endl;
         }
-        
-        std::string prompt = inference_engine_->applyChatTemplate(messages_array.dump(), tools_json);
+
+        // Build prompt — for multimodal, use model-type-specific image placeholders
+        std::string prompt;
+        if (!all_images.empty() && inference_engine_->isMultimodal()) {
+            // Extract text from last user message for the image prompt
+            std::string user_text;
+            for (auto it = chat_req.messages.rbegin(); it != chat_req.messages.rend(); ++it) {
+                if (it->role == "user") { user_text = it->content; break; }
+            }
+            prompt = inference_engine_->buildMultimodalPrompt(user_text, all_images.size());
+        } else {
+            prompt = inference_engine_->applyChatTemplate(messages_array.dump(), tools_json);
+        }
         std::cout << "[Server DEBUG] Generated prompt length: " << prompt.length() << " chars" << std::endl;
         std::cout << "[Server DEBUG] Prompt (first 500 chars): " << prompt.substr(0, std::min(size_t(500), prompt.length())) << std::endl;
         
@@ -574,24 +596,33 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [this, prompt, params, model_id, has_tools, prompt_tokens](size_t offset, httplib::DataSink& sink) {
+                [this, prompt, params, model_id, has_tools, prompt_tokens, all_images](size_t offset, httplib::DataSink& sink) {
                     if (offset > 0) return false; // Only run once
-                    
+
                     try {
                         // Track timing for telemetry
                         auto start_time = std::chrono::high_resolution_clock::now();
                         auto first_token_time = start_time;
                         bool first_token_received = false;
                         int token_count = 0;
-                        
+
                         // Accumulate full response for tool call extraction
                         std::string full_response;
-                        
+
                         // Create reasoning parser for streaming
                         ReasoningStreamParser reasoning_parser;
-                        
+
+                        // Route to multimodal or text streaming
+                        auto stream_fn = [this, &prompt, &params, &all_images](auto callback) {
+                            if (!all_images.empty() && inference_engine_->isMultimodal()) {
+                                inference_engine_->streamCompleteWithImages(prompt, all_images, params, callback);
+                            } else {
+                                inference_engine_->streamComplete(prompt, params, callback);
+                            }
+                        };
+
                         // Generate and send tokens in real-time
-                        inference_engine_->streamComplete(prompt, params, 
+                        stream_fn(
                             [&sink, model_id, &token_count, &full_response, &reasoning_parser, &first_token_received, &first_token_time](const std::string& token, bool is_final) -> bool {
                                 // Track time to first token
                                 if (!first_token_received && !token.empty()) {
@@ -846,9 +877,14 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                 chat_req.max_tokens, chat_req.temperature, chat_req.top_p,
                 chat_req.top_k, chat_req.repeat_penalty, chat_req.stop
             );
-            
+
             CompletionTimingData timing;
-            std::string output = inference_engine_->complete(prompt, params, &timing);
+            std::string output;
+            if (!all_images.empty() && inference_engine_->isMultimodal()) {
+                output = inference_engine_->completeWithImages(prompt, all_images, params, &timing);
+            } else {
+                output = inference_engine_->complete(prompt, params, &timing);
+            }
             
             // Parse reasoning content from output
             auto reasoning_result = parseReasoningContent(output);

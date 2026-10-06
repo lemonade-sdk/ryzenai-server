@@ -12,6 +12,8 @@ struct OgaTokenizer;
 struct OgaGeneratorParams;
 struct OgaGenerator;
 struct OgaSequences;
+struct OgaMultiModalProcessor;
+struct OgaImages;
 
 namespace ryzenai {
 
@@ -28,17 +30,34 @@ public:
     InferenceEngine(const std::string& model_path);
     ~InferenceEngine();
     
-    // Synchronous completion
-    // Returns generated text. If out_timing is provided, stores timing data.
+    // Synchronous completion (text only)
     std::string complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing = nullptr);
-    
-    // Streaming completion
-    void streamComplete(const std::string& prompt, 
+
+    // Synchronous completion with images (multimodal)
+    std::string completeWithImages(const std::string& prompt,
+                                   const std::vector<ImageContent>& images,
+                                   const GenerationParams& params,
+                                   CompletionTimingData* out_timing = nullptr);
+
+    // Streaming completion (text only)
+    void streamComplete(const std::string& prompt,
                        const GenerationParams& params,
                        StreamCallback callback);
-    
+
+    // Streaming completion with images (multimodal)
+    void streamCompleteWithImages(const std::string& prompt,
+                                  const std::vector<ImageContent>& images,
+                                  const GenerationParams& params,
+                                  StreamCallback callback);
+
     // Apply chat template to messages
     std::string applyChatTemplate(const std::string& messages_json, const std::string& tools_json = "");
+
+    // True if the loaded model supports image inputs
+    bool isMultimodal() const { return is_multimodal_; }
+
+    // Build model-type-specific prompt with image placeholders
+    std::string buildMultimodalPrompt(const std::string& text, size_t num_images) const;
     
     // Getters
     std::string getModelName() const { return model_name_; }
@@ -64,6 +83,9 @@ private:
     
     std::unique_ptr<OgaModel> model_;
     std::unique_ptr<OgaTokenizer> tokenizer_;
+    std::unique_ptr<OgaMultiModalProcessor> processor_;  // non-null for multimodal models
+    bool is_multimodal_ = false;
+    std::string model_type_;  // e.g. "phi4mm", "phi3v", "videochat_flash_qwen", "gemma"
     
     std::string model_path_;
     std::string model_name_;

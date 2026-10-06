@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
+#include <cstring>
 
 namespace ryzenai {
 
@@ -364,13 +365,42 @@ void InferenceEngine::setupExecutionProvider() {
 void InferenceEngine::loadModel() {
     try {
         std::cout << "[InferenceEngine] Loading ONNX model from: " << model_path_ << std::endl;
-        
-        // Create model using factory method
+
         model_ = OgaModel::Create(model_path_.c_str());
-        
-        // Create tokenizer using factory method
-        tokenizer_ = OgaTokenizer::Create(*model_);
-        
+
+        // Detect model type from genai_config.json to determine if multimodal
+        std::string config_path = model_path_ + "/genai_config.json";
+        if (fs::exists(config_path)) {
+            try {
+                std::ifstream f(config_path);
+                json cfg = json::parse(f);
+                if (cfg.contains("model") && cfg["model"].contains("type")) {
+                    model_type_ = cfg["model"]["type"].get<std::string>();
+                }
+            } catch (...) {}
+        }
+
+        // Models that require the multimodal processor
+        static const std::vector<std::string> MULTIMODAL_TYPES = {
+            "phi4mm", "phi3v", "videochat_flash_qwen", "gemma", "gemma3", "llava"
+        };
+        for (const auto& t : MULTIMODAL_TYPES) {
+            if (model_type_ == t) {
+                is_multimodal_ = true;
+                break;
+            }
+        }
+
+        if (is_multimodal_) {
+            std::cout << "[InferenceEngine] Multimodal model detected (type=" << model_type_
+                      << "), creating MultiModalProcessor" << std::endl;
+            processor_ = OgaMultiModalProcessor::Create(*model_);
+            // For multimodal models, get the tokenizer from the processor
+            tokenizer_ = OgaTokenizer::Create(*model_);
+        } else {
+            tokenizer_ = OgaTokenizer::Create(*model_);
+        }
+
         // Load chat template from tokenizer_config.json
         std::string tokenizer_config_path = model_path_ + "/tokenizer_config.json";
         if (fs::exists(tokenizer_config_path)) {
@@ -385,11 +415,156 @@ void InferenceEngine::loadModel() {
                 std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
             }
         }
-        
+
         std::cout << "[InferenceEngine] Model and tokenizer loaded successfully" << std::endl;
-        
+
     } catch (const std::exception& e) {
         throw std::runtime_error("Failed to load model: " + std::string(e.what()));
+    }
+}
+
+std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size_t num_images) const {
+    // Build model-type-specific prompt with image placeholders
+    if (model_type_ == "phi4mm" || model_type_ == "phi3v") {
+        std::string prompt = "<|user|>\n";
+        for (size_t i = 0; i < num_images; ++i) {
+            prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
+        }
+        prompt += text + "<|end|>\n<|assistant|>\n";
+        return prompt;
+    } else if (model_type_ == "videochat_flash_qwen") {
+        std::string vision_blocks;
+        for (size_t i = 0; i < num_images; ++i) {
+            vision_blocks += "<|vision_start|><|vision_end|>";
+        }
+        return "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+               "<|im_start|>user\n" + vision_blocks + text + "<|im_end|>\n"
+               "<|im_start|>assistant\n";
+    } else {
+        // Generic: use chat template with image content parts
+        return "<image>\n" + text;
+    }
+}
+
+std::string InferenceEngine::completeWithImages(const std::string& prompt,
+                                                 const std::vector<ImageContent>& images,
+                                                 const GenerationParams& params,
+                                                 CompletionTimingData* out_timing) {
+    std::lock_guard<std::mutex> lock(inference_mutex_);
+
+    if (!is_multimodal_ || !processor_) {
+        throw std::runtime_error("Model is not multimodal — use complete() instead");
+    }
+
+    try {
+        auto start_time = std::chrono::high_resolution_clock::now();
+        auto first_token_time = start_time;
+        bool first_token_received = false;
+
+        // Load images from raw bytes
+        std::vector<const uint8_t*> ptrs;
+        std::vector<size_t> sizes;
+        for (const auto& img : images) {
+            ptrs.push_back(img.data.data());
+            sizes.push_back(img.data.size());
+        }
+        auto oga_images = OgaImages::LoadFromBuffers(ptrs.data(), sizes.data(), images.size());
+
+        // Process prompt + images through the multimodal processor
+        auto named_tensors = processor_->ProcessImagesAndPrompts(prompt.c_str(), oga_images.get());
+
+        auto gen_params = OgaGeneratorParams::Create(*model_);
+        gen_params->SetSearchOption("max_length", params.max_length + 1024);
+        gen_params->SetSearchOption("temperature", params.temperature);
+        gen_params->SetSearchOption("top_p", params.top_p);
+        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
+        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
+        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
+
+        auto generator = OgaGenerator::Create(*model_, *gen_params);
+        generator->SetInputs(*named_tensors);
+
+        auto stream = processor_->CreateStream();
+        std::string result;
+        int token_count = 0;
+
+        while (!generator->IsDone() && token_count < params.max_length) {
+            generator->GenerateNextToken();
+            if (!first_token_received) {
+                first_token_time = std::chrono::high_resolution_clock::now();
+                first_token_received = true;
+            }
+            const int32_t* tokens = generator->GetSequenceData(0);
+            size_t num = generator->GetSequenceCount(0);
+            const char* decoded = stream->Decode(tokens[num - 1]);
+            if (decoded) result += decoded;
+            ++token_count;
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        if (out_timing) {
+            out_timing->token_count = token_count;
+            out_timing->ttft_seconds = std::chrono::duration<double>(first_token_time - start_time).count();
+            out_timing->total_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+            double decode_s = std::chrono::duration<double>(end_time - first_token_time).count();
+            out_timing->tps = (token_count > 1 && decode_s > 0) ? (token_count - 1) / decode_s : 0.0;
+        }
+
+        return result;
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Multimodal inference failed: " + std::string(e.what()));
+    }
+}
+
+void InferenceEngine::streamCompleteWithImages(const std::string& prompt,
+                                                const std::vector<ImageContent>& images,
+                                                const GenerationParams& params,
+                                                StreamCallback callback) {
+    std::lock_guard<std::mutex> lock(inference_mutex_);
+
+    if (!is_multimodal_ || !processor_) {
+        throw std::runtime_error("Model is not multimodal — use streamComplete() instead");
+    }
+
+    try {
+        std::vector<const uint8_t*> ptrs;
+        std::vector<size_t> sizes;
+        for (const auto& img : images) {
+            ptrs.push_back(img.data.data());
+            sizes.push_back(img.data.size());
+        }
+        auto oga_images = OgaImages::LoadFromBuffers(ptrs.data(), sizes.data(), images.size());
+        auto named_tensors = processor_->ProcessImagesAndPrompts(prompt.c_str(), oga_images.get());
+
+        auto gen_params = OgaGeneratorParams::Create(*model_);
+        gen_params->SetSearchOption("max_length", params.max_length + 1024);
+        gen_params->SetSearchOption("temperature", params.temperature);
+        gen_params->SetSearchOption("top_p", params.top_p);
+        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
+        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
+        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
+
+        auto generator = OgaGenerator::Create(*model_, *gen_params);
+        generator->SetInputs(*named_tensors);
+
+        auto stream = processor_->CreateStream();
+        int token_count = 0;
+
+        while (!generator->IsDone() && token_count < params.max_length) {
+            generator->GenerateNextToken();
+            const int32_t* tokens = generator->GetSequenceData(0);
+            size_t num = generator->GetSequenceCount(0);
+            const char* decoded = stream->Decode(tokens[num - 1]);
+            bool is_final = generator->IsDone();
+            if (decoded && decoded[0] != '\0') {
+                if (!callback(std::string(decoded), is_final)) break;
+            }
+            ++token_count;
+        }
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Multimodal streaming inference failed: " + std::string(e.what()));
     }
 }
 
