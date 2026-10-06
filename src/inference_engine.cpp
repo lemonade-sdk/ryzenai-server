@@ -368,27 +368,26 @@ void InferenceEngine::loadModel() {
 
         model_ = OgaModel::Create(model_path_.c_str());
 
-        // Detect model type from genai_config.json to determine if multimodal
+        // Inspect genai_config.json to determine model type AND multimodal support.
+        // Authoritative multimodal signal is the presence of a "vision" (or "speech"/
+        // "audio") sub-block and/or an image_token_id — this is what OGA itself uses
+        // to wire up the multimodal processor. A hardcoded model-type allowlist is
+        // fragile: e.g. gemma-4 reports type "gemma4" which no fixed list anticipates.
         std::string config_path = model_path_ + "/genai_config.json";
         if (fs::exists(config_path)) {
             try {
                 std::ifstream f(config_path);
                 json cfg = json::parse(f);
-                if (cfg.contains("model") && cfg["model"].contains("type")) {
-                    model_type_ = cfg["model"]["type"].get<std::string>();
+                if (cfg.contains("model") && cfg["model"].is_object()) {
+                    const auto& m = cfg["model"];
+                    if (m.contains("type") && m["type"].is_string()) {
+                        model_type_ = m["type"].get<std::string>();
+                    }
+                    if (m.contains("vision") || m.contains("image_token_id")) {
+                        is_multimodal_ = true;
+                    }
                 }
             } catch (...) {}
-        }
-
-        // Models that require the multimodal processor
-        static const std::vector<std::string> MULTIMODAL_TYPES = {
-            "phi4mm", "phi3v", "videochat_flash_qwen", "gemma", "gemma3", "llava"
-        };
-        for (const auto& t : MULTIMODAL_TYPES) {
-            if (model_type_ == t) {
-                is_multimodal_ = true;
-                break;
-            }
         }
 
         if (is_multimodal_) {
@@ -424,7 +423,40 @@ void InferenceEngine::loadModel() {
 }
 
 std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size_t num_images) const {
-    // Build model-type-specific prompt with image placeholders
+    // Preferred path: render the model's own chat template with structured content
+    // parts [{type:image}...,{type:text}]. This mirrors the Python reference
+    // (vlm_run.py build_prompt_chat_template) and produces the exact image token
+    // the model expects — e.g. gemma-4 emits "<|image|>" and its "<|turn>" turn
+    // structure, which no hardcoded string could reliably reproduce.
+    if (!chat_template_.empty()) {
+        try {
+            json content = json::array();
+            for (size_t i = 0; i < num_images; ++i) {
+                content.push_back({{"type", "image"}});
+            }
+            content.push_back({{"type", "text"}, {"text", text}});
+            json messages = json::array();
+            messages.push_back({{"role", "user"}, {"content", content}});
+
+            auto result = tokenizer_->ApplyChatTemplate(
+                chat_template_.c_str(),
+                messages.dump().c_str(),
+                nullptr,  // no tools
+                true      // add_generation_prompt
+            );
+            std::string rendered(result);
+            if (!rendered.empty()) {
+                std::cout << "[InferenceEngine] Built multimodal prompt via chat template "
+                          << "(" << num_images << " image(s))" << std::endl;
+                return rendered;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[WARNING] Chat-template multimodal prompt failed: " << e.what()
+                      << " — falling back to model-type heuristics" << std::endl;
+        }
+    }
+
+    // Fallbacks for models whose template doesn't support content-part rendering.
     if (model_type_ == "phi4mm" || model_type_ == "phi3v") {
         std::string prompt = "<|user|>\n";
         for (size_t i = 0; i < num_images; ++i) {
@@ -440,10 +472,9 @@ std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size
         return "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
                "<|im_start|>user\n" + vision_blocks + text + "<|im_end|>\n"
                "<|im_start|>assistant\n";
-    } else {
-        // Generic: use chat template with image content parts
-        return "<image>\n" + text;
     }
+    // Last-resort generic placeholder.
+    return "<image>\n" + text;
 }
 
 std::string InferenceEngine::completeWithImages(const std::string& prompt,
