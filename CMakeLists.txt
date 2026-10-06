@@ -100,7 +100,9 @@ if(WIN32 AND MEDUSA_BUILD)
         message(STATUS "Generated ${OGA_GENAI_LIB}")
     endif()
     set(OGA_LIB "${OGA_GENAI_LIB}")
-    set(OGA_INCLUDE "${OGA_ROOT}/voe/include/onnxruntime/core/session")
+    # Use RyzenAI 1.7.1 OGA headers — they include full multimodal API (OgaMultiModalProcessor, OgaImages)
+    # which matches the exported C API symbols in the Medusa onnxruntime-genai.dll
+    set(OGA_INCLUDE "C:/Program Files/RyzenAI/1.7.1/LLM/include")
 elseif(WIN32)
     find_library(OGA_LIB
         NAMES onnxruntime-genai

@@ -462,16 +462,16 @@ std::string InferenceEngine::completeWithImages(const std::string& prompt,
         bool first_token_received = false;
 
         // Load images from raw bytes
-        std::vector<const uint8_t*> ptrs;
+        std::vector<const void*> ptrs;
         std::vector<size_t> sizes;
         for (const auto& img : images) {
             ptrs.push_back(img.data.data());
             sizes.push_back(img.data.size());
         }
-        auto oga_images = OgaImages::LoadFromBuffers(ptrs.data(), sizes.data(), images.size());
+        auto oga_images = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
 
         // Process prompt + images through the multimodal processor
-        auto named_tensors = processor_->ProcessImagesAndPrompts(prompt.c_str(), oga_images.get());
+        auto named_tensors = processor_->ProcessImages(prompt.c_str(), oga_images.get());
 
         auto gen_params = OgaGeneratorParams::Create(*model_);
         gen_params->SetSearchOption("max_length", params.max_length + 1024);
@@ -484,7 +484,7 @@ std::string InferenceEngine::completeWithImages(const std::string& prompt,
         auto generator = OgaGenerator::Create(*model_, *gen_params);
         generator->SetInputs(*named_tensors);
 
-        auto stream = processor_->CreateStream();
+        auto stream = OgaTokenizerStream::Create(*processor_);
         std::string result;
         int token_count = 0;
 
@@ -528,14 +528,14 @@ void InferenceEngine::streamCompleteWithImages(const std::string& prompt,
     }
 
     try {
-        std::vector<const uint8_t*> ptrs;
+        std::vector<const void*> ptrs;
         std::vector<size_t> sizes;
         for (const auto& img : images) {
             ptrs.push_back(img.data.data());
             sizes.push_back(img.data.size());
         }
-        auto oga_images = OgaImages::LoadFromBuffers(ptrs.data(), sizes.data(), images.size());
-        auto named_tensors = processor_->ProcessImagesAndPrompts(prompt.c_str(), oga_images.get());
+        auto oga_images = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
+        auto named_tensors = processor_->ProcessImages(prompt.c_str(), oga_images.get());
 
         auto gen_params = OgaGeneratorParams::Create(*model_);
         gen_params->SetSearchOption("max_length", params.max_length + 1024);
@@ -548,7 +548,7 @@ void InferenceEngine::streamCompleteWithImages(const std::string& prompt,
         auto generator = OgaGenerator::Create(*model_, *gen_params);
         generator->SetInputs(*named_tensors);
 
-        auto stream = processor_->CreateStream();
+        auto stream = OgaTokenizerStream::Create(*processor_);
         int token_count = 0;
 
         while (!generator->IsDone() && token_count < params.max_length) {
