@@ -368,11 +368,9 @@ void InferenceEngine::loadModel() {
 
         model_ = OgaModel::Create(model_path_.c_str());
 
-        // Inspect genai_config.json to determine model type AND multimodal support.
-        // Authoritative multimodal signal is the presence of a "vision" (or "speech"/
-        // "audio") sub-block and/or an image_token_id — this is what OGA itself uses
-        // to wire up the multimodal processor. A hardcoded model-type allowlist is
-        // fragile: e.g. gemma-4 reports type "gemma4" which no fixed list anticipates.
+        // A "vision" block or image_token_id in genai_config.json marks the model
+        // as multimodal — the same signal OGA uses. This beats a model-type allowlist
+        // (e.g. gemma-4 reports type "gemma4", which no fixed list would anticipate).
         std::string config_path = model_path_ + "/genai_config.json";
         if (fs::exists(config_path)) {
             try {
@@ -394,11 +392,8 @@ void InferenceEngine::loadModel() {
             std::cout << "[InferenceEngine] Multimodal model detected (type=" << model_type_
                       << "), creating MultiModalProcessor" << std::endl;
             processor_ = OgaMultiModalProcessor::Create(*model_);
-            // For multimodal models, get the tokenizer from the processor
-            tokenizer_ = OgaTokenizer::Create(*model_);
-        } else {
-            tokenizer_ = OgaTokenizer::Create(*model_);
         }
+        tokenizer_ = OgaTokenizer::Create(*model_);
 
         // Load chat template from tokenizer_config.json
         std::string tokenizer_config_path = model_path_ + "/tokenizer_config.json";
@@ -424,43 +419,34 @@ void InferenceEngine::loadModel() {
 
 std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size_t num_images,
                                                     size_t num_audios) const {
-    // Preferred path: render the model's own chat template with structured content
-    // parts [{type:image}...,{type:audio}...,{type:text}]. This mirrors the Python
-    // references (vlm_run.py / model-mm.py get_user_content) and produces the exact
-    // media tokens the model expects — e.g. gemma-4 emits "<|image|>" / "<|audio|>"
-    // and its "<|turn>" turn structure, which no hardcoded string reproduces reliably.
+    // Render the model's own chat template with structured content parts
+    // [image..., audio..., text] so each model emits its own media tokens
+    // (e.g. gemma-4's <|image|>/<|audio|> and <|turn> structure).
     if (!chat_template_.empty()) {
         try {
             json content = json::array();
-            for (size_t i = 0; i < num_images; ++i) {
-                content.push_back({{"type", "image"}});
-            }
-            for (size_t i = 0; i < num_audios; ++i) {
-                content.push_back({{"type", "audio"}});
-            }
+            for (size_t i = 0; i < num_images; ++i) content.push_back({{"type", "image"}});
+            for (size_t i = 0; i < num_audios; ++i) content.push_back({{"type", "audio"}});
             content.push_back({{"type", "text"}, {"text", text}});
             json messages = json::array();
             messages.push_back({{"role", "user"}, {"content", content}});
 
             auto result = tokenizer_->ApplyChatTemplate(
-                chat_template_.c_str(),
-                messages.dump().c_str(),
-                nullptr,  // no tools
-                true      // add_generation_prompt
-            );
+                chat_template_.c_str(), messages.dump().c_str(),
+                nullptr, /*add_generation_prompt=*/true);
             std::string rendered(result);
             if (!rendered.empty()) {
-                std::cout << "[InferenceEngine] Built multimodal prompt via chat template "
-                          << "(" << num_images << " image(s), " << num_audios << " audio(s))" << std::endl;
+                std::cout << "[InferenceEngine] Built multimodal prompt via chat template ("
+                          << num_images << " image(s), " << num_audios << " audio(s))" << std::endl;
                 return rendered;
             }
         } catch (const std::exception& e) {
-            std::cerr << "[WARNING] Chat-template multimodal prompt failed: " << e.what()
+            std::cerr << "[WARNING] Chat-template prompt failed: " << e.what()
                       << " — falling back to model-type heuristics" << std::endl;
         }
     }
 
-    // Fallbacks for models whose template doesn't support content-part rendering.
+    // Fallbacks for models whose template doesn't render content parts.
     if (model_type_ == "phi4mm" || model_type_ == "phi3v") {
         std::string prompt = "<|user|>\n";
         for (size_t i = 0; i < num_images; ++i) {
@@ -484,46 +470,40 @@ std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size
     return "<image>\n" + text;
 }
 
-// Process a prompt with optional images and/or audios through the multimodal
-// processor. Returns the NamedTensors ready for OgaGenerator::SetInputs. The
-// OgaImages/OgaAudios objects must outlive the call (processing reads them), so
-// they are kept alive by the caller-provided holders.
-static std::unique_ptr<OgaNamedTensors> process_media(
-    OgaMultiModalProcessor& processor,
-    const std::string& prompt,
-    const std::vector<ImageContent>& images,
-    const std::vector<AudioContent>& audios,
-    std::unique_ptr<OgaImages>& images_holder,
-    std::unique_ptr<OgaAudios>& audios_holder) {
+// Collect {data,size} pointers from a media vector. The returned ptr/size
+// vectors reference the caller's buffers, which must outlive the OgaX::Load call.
+template <typename Media>
+static void collect_buffers(const std::vector<Media>& items,
+                            std::vector<const void*>& ptrs,
+                            std::vector<size_t>& sizes) {
+    ptrs.reserve(items.size());
+    sizes.reserve(items.size());
+    for (const auto& it : items) {
+        ptrs.push_back(it.data.data());
+        sizes.push_back(it.data.size());
+    }
+}
 
+// Process prompt + optional images/audios. The holders keep the OGA media
+// objects alive for the duration of the ProcessImagesAndAudios call.
+static std::unique_ptr<OgaNamedTensors> process_media(
+    OgaMultiModalProcessor& processor, const std::string& prompt,
+    const std::vector<ImageContent>& images, const std::vector<AudioContent>& audios,
+    std::unique_ptr<OgaImages>& images_holder, std::unique_ptr<OgaAudios>& audios_holder) {
+
+    std::vector<const void*> ptrs; std::vector<size_t> sizes;
     if (!images.empty()) {
-        std::vector<const void*> ptrs;
-        std::vector<size_t> sizes;
-        ptrs.reserve(images.size());
-        sizes.reserve(images.size());
-        for (const auto& img : images) {
-            ptrs.push_back(img.data.data());
-            sizes.push_back(img.data.size());
-        }
+        collect_buffers(images, ptrs, sizes);
         images_holder = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
     }
     if (!audios.empty()) {
-        std::vector<const void*> ptrs;
-        std::vector<size_t> sizes;
-        ptrs.reserve(audios.size());
-        sizes.reserve(audios.size());
-        for (const auto& aud : audios) {
-            ptrs.push_back(aud.data.data());
-            sizes.push_back(aud.data.size());
-        }
+        ptrs.clear(); sizes.clear();
+        collect_buffers(audios, ptrs, sizes);
         audios_holder = OgaAudios::Load(ptrs.data(), sizes.data(), audios.size());
     }
-
-    // The unified call handles images-only, audio-only, and both (null args are
-    // simply skipped by the processor).
+    // Null args are skipped, so this covers images-only, audio-only, and both.
     return processor.ProcessImagesAndAudios(prompt.c_str(),
-                                            images_holder.get(),
-                                            audios_holder.get());
+                                            images_holder.get(), audios_holder.get());
 }
 
 std::string InferenceEngine::completeWithMedia(const std::string& prompt,

@@ -51,13 +51,11 @@ static void parse_content_array(const json& content_arr, ChatMessage& message) {
                 }
             }
         } else if (type == "input_audio") {
-            // OpenAI audio format: {"type":"input_audio",
-            //   "input_audio":{"data":"<base64>","format":"wav"}}
-            // Unlike image_url, the data is raw base64 (no data: URI prefix).
+            // {"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}
             if (!part.contains("input_audio") || !part["input_audio"].is_object()) continue;
             const auto& ia = part["input_audio"];
             std::string b64data = ia.value("data", "");
-            // Tolerate a data-URI form too, just in case a client sends one.
+            // Strip a data-URI prefix if a client sends one.
             const std::string b64marker = ";base64,";
             auto semi = b64data.find(b64marker);
             if (b64data.rfind("data:", 0) == 0 && semi != std::string::npos) {

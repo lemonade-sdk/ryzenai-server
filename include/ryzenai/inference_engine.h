@@ -34,8 +34,7 @@ public:
     // Synchronous completion (text only)
     std::string complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing = nullptr);
 
-    // Synchronous multimodal completion. Either images or audios (or both) may
-    // be empty. Routed through the OGA multimodal processor.
+    // Synchronous multimodal completion (images and/or audios).
     std::string completeWithMedia(const std::string& prompt,
                                   const std::vector<ImageContent>& images,
                                   const std::vector<AudioContent>& audios,
@@ -47,7 +46,7 @@ public:
                        const GenerationParams& params,
                        StreamCallback callback);
 
-    // Streaming multimodal completion. Either images or audios (or both) may be empty.
+    // Streaming multimodal completion (images and/or audios).
     void streamCompleteWithMedia(const std::string& prompt,
                                  const std::vector<ImageContent>& images,
                                  const std::vector<AudioContent>& audios,
