@@ -69,39 +69,19 @@ endif()
 #   The Medusa zip ships no onnxruntime-genai.lib; generate an import lib at configure time.
 # - Linux installer: ${OGA_ROOT}/deployment/lib (no headers shipped)
 if(WIN32 AND MEDUSA_BUILD)
-    # Generate onnxruntime-genai import lib from the DLL (requires VS toolchain on PATH).
-    set(OGA_GENAI_DLL "${OGA_ROOT}/onnxruntime-genai.dll")
+    # Import lib pre-generated from Medusa onnxruntime-genai.dll using dumpbin + lib.exe.
+    # Place onnxruntime-genai.lib in the build directory before configuring.
     set(OGA_GENAI_LIB "${CMAKE_BINARY_DIR}/onnxruntime-genai.lib")
     if(NOT EXISTS ${OGA_GENAI_LIB})
-        message(STATUS "Generating import lib from ${OGA_GENAI_DLL}...")
-        execute_process(
-            COMMAND dumpbin /exports "${OGA_GENAI_DLL}"
-            OUTPUT_VARIABLE _DUMPBIN_OUT
-            RESULT_VARIABLE _DUMPBIN_RC
-        )
-        if(NOT _DUMPBIN_RC EQUAL 0)
-            message(FATAL_ERROR "dumpbin failed on ${OGA_GENAI_DLL}. Ensure Visual Studio tools are on PATH.")
-        endif()
-        # Extract exported names and write a .def file
-        string(REGEX MATCHALL "[0-9]+ +[0-9A-Fa-f]+ +[0-9A-Fa-f]+ +([A-Za-z_][A-Za-z0-9_@?]*)" _EXPORTS "${_DUMPBIN_OUT}")
-        set(_DEF_CONTENT "LIBRARY onnxruntime-genai\nEXPORTS\n")
-        foreach(_MATCH ${_EXPORTS})
-            string(REGEX REPLACE "[0-9]+ +[0-9A-Fa-f]+ +[0-9A-Fa-f]+ +([A-Za-z_][A-Za-z0-9_@?]*)" "\\1" _SYM "${_MATCH}")
-            string(APPEND _DEF_CONTENT "    ${_SYM}\n")
-        endforeach()
-        file(WRITE "${CMAKE_BINARY_DIR}/onnxruntime-genai.def" "${_DEF_CONTENT}")
-        execute_process(
-            COMMAND lib /def:"${CMAKE_BINARY_DIR}/onnxruntime-genai.def" /out:"${OGA_GENAI_LIB}" /machine:x64
-            RESULT_VARIABLE _LIB_RC
-        )
-        if(NOT _LIB_RC EQUAL 0)
-            message(FATAL_ERROR "lib.exe failed generating import lib. Ensure Visual Studio tools are on PATH.")
-        endif()
-        message(STATUS "Generated ${OGA_GENAI_LIB}")
+        message(FATAL_ERROR "onnxruntime-genai.lib not found at ${OGA_GENAI_LIB}. "
+            "Generate it from the Medusa DLL:\n"
+            "  dumpbin /exports onnxruntime-genai.dll > oga.def  (edit to LIBRARY+EXPORTS format)\n"
+            "  lib /def:oga.def /out:onnxruntime-genai.lib /machine:x64\n"
+            "Then copy onnxruntime-genai.lib into your build directory.")
     endif()
     set(OGA_LIB "${OGA_GENAI_LIB}")
-    # Use RyzenAI 1.7.1 OGA headers — they include full multimodal API (OgaMultiModalProcessor, OgaImages)
-    # which matches the exported C API symbols in the Medusa onnxruntime-genai.dll
+    # Use RyzenAI 1.7.1 OGA headers — full multimodal API (OgaMultiModalProcessor, OgaImages)
+    # matches the exported C API symbols in the Medusa onnxruntime-genai.dll
     set(OGA_INCLUDE "C:/Program Files/RyzenAI/1.7.1/LLM/include")
 elseif(WIN32)
     find_library(OGA_LIB
