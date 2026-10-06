@@ -422,17 +422,21 @@ void InferenceEngine::loadModel() {
     }
 }
 
-std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size_t num_images) const {
+std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size_t num_images,
+                                                    size_t num_audios) const {
     // Preferred path: render the model's own chat template with structured content
-    // parts [{type:image}...,{type:text}]. This mirrors the Python reference
-    // (vlm_run.py build_prompt_chat_template) and produces the exact image token
-    // the model expects — e.g. gemma-4 emits "<|image|>" and its "<|turn>" turn
-    // structure, which no hardcoded string could reliably reproduce.
+    // parts [{type:image}...,{type:audio}...,{type:text}]. This mirrors the Python
+    // references (vlm_run.py / model-mm.py get_user_content) and produces the exact
+    // media tokens the model expects — e.g. gemma-4 emits "<|image|>" / "<|audio|>"
+    // and its "<|turn>" turn structure, which no hardcoded string reproduces reliably.
     if (!chat_template_.empty()) {
         try {
             json content = json::array();
             for (size_t i = 0; i < num_images; ++i) {
                 content.push_back({{"type", "image"}});
+            }
+            for (size_t i = 0; i < num_audios; ++i) {
+                content.push_back({{"type", "audio"}});
             }
             content.push_back({{"type", "text"}, {"text", text}});
             json messages = json::array();
@@ -447,7 +451,7 @@ std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size
             std::string rendered(result);
             if (!rendered.empty()) {
                 std::cout << "[InferenceEngine] Built multimodal prompt via chat template "
-                          << "(" << num_images << " image(s))" << std::endl;
+                          << "(" << num_images << " image(s), " << num_audios << " audio(s))" << std::endl;
                 return rendered;
             }
         } catch (const std::exception& e) {
@@ -461,6 +465,9 @@ std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size
         std::string prompt = "<|user|>\n";
         for (size_t i = 0; i < num_images; ++i) {
             prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
+        }
+        for (size_t i = 0; i < num_audios; ++i) {
+            prompt += "<|audio_" + std::to_string(i + 1) + "|>\n";
         }
         prompt += text + "<|end|>\n<|assistant|>\n";
         return prompt;
@@ -477,14 +484,60 @@ std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size
     return "<image>\n" + text;
 }
 
-std::string InferenceEngine::completeWithImages(const std::string& prompt,
-                                                 const std::vector<ImageContent>& images,
-                                                 const GenerationParams& params,
-                                                 CompletionTimingData* out_timing) {
+// Process a prompt with optional images and/or audios through the multimodal
+// processor. Returns the NamedTensors ready for OgaGenerator::SetInputs. The
+// OgaImages/OgaAudios objects must outlive the call (processing reads them), so
+// they are kept alive by the caller-provided holders.
+static std::unique_ptr<OgaNamedTensors> process_media(
+    OgaMultiModalProcessor& processor,
+    const std::string& prompt,
+    const std::vector<ImageContent>& images,
+    const std::vector<AudioContent>& audios,
+    std::unique_ptr<OgaImages>& images_holder,
+    std::unique_ptr<OgaAudios>& audios_holder) {
+
+    if (!images.empty()) {
+        std::vector<const void*> ptrs;
+        std::vector<size_t> sizes;
+        ptrs.reserve(images.size());
+        sizes.reserve(images.size());
+        for (const auto& img : images) {
+            ptrs.push_back(img.data.data());
+            sizes.push_back(img.data.size());
+        }
+        images_holder = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
+    }
+    if (!audios.empty()) {
+        std::vector<const void*> ptrs;
+        std::vector<size_t> sizes;
+        ptrs.reserve(audios.size());
+        sizes.reserve(audios.size());
+        for (const auto& aud : audios) {
+            ptrs.push_back(aud.data.data());
+            sizes.push_back(aud.data.size());
+        }
+        audios_holder = OgaAudios::Load(ptrs.data(), sizes.data(), audios.size());
+    }
+
+    // The unified call handles images-only, audio-only, and both (null args are
+    // simply skipped by the processor).
+    return processor.ProcessImagesAndAudios(prompt.c_str(),
+                                            images_holder.get(),
+                                            audios_holder.get());
+}
+
+std::string InferenceEngine::completeWithMedia(const std::string& prompt,
+                                               const std::vector<ImageContent>& images,
+                                               const std::vector<AudioContent>& audios,
+                                               const GenerationParams& params,
+                                               CompletionTimingData* out_timing) {
     std::lock_guard<std::mutex> lock(inference_mutex_);
 
     if (!is_multimodal_ || !processor_) {
         throw std::runtime_error("Model is not multimodal — use complete() instead");
+    }
+    if (images.empty() && audios.empty()) {
+        throw std::runtime_error("completeWithMedia called with no media");
     }
 
     try {
@@ -492,17 +545,10 @@ std::string InferenceEngine::completeWithImages(const std::string& prompt,
         auto first_token_time = start_time;
         bool first_token_received = false;
 
-        // Load images from raw bytes
-        std::vector<const void*> ptrs;
-        std::vector<size_t> sizes;
-        for (const auto& img : images) {
-            ptrs.push_back(img.data.data());
-            sizes.push_back(img.data.size());
-        }
-        auto oga_images = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
-
-        // Process prompt + images through the multimodal processor
-        auto named_tensors = processor_->ProcessImages(prompt.c_str(), oga_images.get());
+        std::unique_ptr<OgaImages> images_holder;
+        std::unique_ptr<OgaAudios> audios_holder;
+        auto named_tensors = process_media(*processor_, prompt, images, audios,
+                                           images_holder, audios_holder);
 
         auto gen_params = OgaGeneratorParams::Create(*model_);
         gen_params->SetSearchOption("max_length", params.max_length + 1024);
@@ -548,25 +594,25 @@ std::string InferenceEngine::completeWithImages(const std::string& prompt,
     }
 }
 
-void InferenceEngine::streamCompleteWithImages(const std::string& prompt,
-                                                const std::vector<ImageContent>& images,
-                                                const GenerationParams& params,
-                                                StreamCallback callback) {
+void InferenceEngine::streamCompleteWithMedia(const std::string& prompt,
+                                              const std::vector<ImageContent>& images,
+                                              const std::vector<AudioContent>& audios,
+                                              const GenerationParams& params,
+                                              StreamCallback callback) {
     std::lock_guard<std::mutex> lock(inference_mutex_);
 
     if (!is_multimodal_ || !processor_) {
         throw std::runtime_error("Model is not multimodal — use streamComplete() instead");
     }
+    if (images.empty() && audios.empty()) {
+        throw std::runtime_error("streamCompleteWithMedia called with no media");
+    }
 
     try {
-        std::vector<const void*> ptrs;
-        std::vector<size_t> sizes;
-        for (const auto& img : images) {
-            ptrs.push_back(img.data.data());
-            sizes.push_back(img.data.size());
-        }
-        auto oga_images = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
-        auto named_tensors = processor_->ProcessImages(prompt.c_str(), oga_images.get());
+        std::unique_ptr<OgaImages> images_holder;
+        std::unique_ptr<OgaAudios> audios_holder;
+        auto named_tensors = process_media(*processor_, prompt, images, audios,
+                                           images_holder, audios_holder);
 
         auto gen_params = OgaGeneratorParams::Create(*model_);
         gen_params->SetSearchOption("max_length", params.max_length + 1024);

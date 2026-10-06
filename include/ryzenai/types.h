@@ -24,11 +24,18 @@ struct ImageContent {
     std::string mime_type;      // e.g. "image/jpeg"
 };
 
-// Chat message — content is text; images holds any inline image_url parts
+// Audio content part extracted from an OpenAI multimodal message
+struct AudioContent {
+    std::vector<uint8_t> data;  // raw decoded bytes (e.g. WAV)
+    std::string format;         // e.g. "wav"
+};
+
+// Chat message — content is text; images/audios hold any inline media parts
 struct ChatMessage {
     std::string role;
     std::string content;
     std::vector<ImageContent> images;
+    std::vector<AudioContent> audios;
 };
 
 // Completion request (OpenAI format)

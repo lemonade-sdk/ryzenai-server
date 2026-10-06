@@ -25,8 +25,8 @@ static std::vector<uint8_t> decode_base64(const std::string& input) {
     return out;
 }
 
-// Parse a single content part array from an OpenAI vision message.
-// Fills message.content (text) and message.images (decoded image bytes).
+// Parse a single content-part array from an OpenAI multimodal message.
+// Fills message.content (text), message.images, and message.audios.
 static void parse_content_array(const json& content_arr, ChatMessage& message) {
     for (const auto& part : content_arr) {
         std::string type = part.value("type", "");
@@ -50,6 +50,24 @@ static void parse_content_array(const json& content_arr, ChatMessage& message) {
                     message.images.push_back(std::move(img));
                 }
             }
+        } else if (type == "input_audio") {
+            // OpenAI audio format: {"type":"input_audio",
+            //   "input_audio":{"data":"<base64>","format":"wav"}}
+            // Unlike image_url, the data is raw base64 (no data: URI prefix).
+            if (!part.contains("input_audio") || !part["input_audio"].is_object()) continue;
+            const auto& ia = part["input_audio"];
+            std::string b64data = ia.value("data", "");
+            // Tolerate a data-URI form too, just in case a client sends one.
+            const std::string b64marker = ";base64,";
+            auto semi = b64data.find(b64marker);
+            if (b64data.rfind("data:", 0) == 0 && semi != std::string::npos) {
+                b64data = b64data.substr(semi + b64marker.size());
+            }
+            if (b64data.empty()) continue;
+            AudioContent aud;
+            aud.format = ia.value("format", "wav");
+            aud.data = decode_base64(b64data);
+            message.audios.push_back(std::move(aud));
         }
     }
 }

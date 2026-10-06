@@ -14,6 +14,7 @@ struct OgaGenerator;
 struct OgaSequences;
 struct OgaMultiModalProcessor;
 struct OgaImages;
+struct OgaAudios;
 
 namespace ryzenai {
 
@@ -33,31 +34,36 @@ public:
     // Synchronous completion (text only)
     std::string complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing = nullptr);
 
-    // Synchronous completion with images (multimodal)
-    std::string completeWithImages(const std::string& prompt,
-                                   const std::vector<ImageContent>& images,
-                                   const GenerationParams& params,
-                                   CompletionTimingData* out_timing = nullptr);
+    // Synchronous multimodal completion. Either images or audios (or both) may
+    // be empty. Routed through the OGA multimodal processor.
+    std::string completeWithMedia(const std::string& prompt,
+                                  const std::vector<ImageContent>& images,
+                                  const std::vector<AudioContent>& audios,
+                                  const GenerationParams& params,
+                                  CompletionTimingData* out_timing = nullptr);
 
     // Streaming completion (text only)
     void streamComplete(const std::string& prompt,
                        const GenerationParams& params,
                        StreamCallback callback);
 
-    // Streaming completion with images (multimodal)
-    void streamCompleteWithImages(const std::string& prompt,
-                                  const std::vector<ImageContent>& images,
-                                  const GenerationParams& params,
-                                  StreamCallback callback);
+    // Streaming multimodal completion. Either images or audios (or both) may be empty.
+    void streamCompleteWithMedia(const std::string& prompt,
+                                 const std::vector<ImageContent>& images,
+                                 const std::vector<AudioContent>& audios,
+                                 const GenerationParams& params,
+                                 StreamCallback callback);
 
     // Apply chat template to messages
     std::string applyChatTemplate(const std::string& messages_json, const std::string& tools_json = "");
 
-    // True if the loaded model supports image inputs
+    // True if the loaded model supports image/audio inputs
     bool isMultimodal() const { return is_multimodal_; }
 
-    // Build model-type-specific prompt with image placeholders
-    std::string buildMultimodalPrompt(const std::string& text, size_t num_images) const;
+    // Build the multimodal prompt via the model's chat template, injecting
+    // num_images image parts and num_audios audio parts.
+    std::string buildMultimodalPrompt(const std::string& text, size_t num_images,
+                                      size_t num_audios = 0) const;
     
     // Getters
     std::string getModelName() const { return model_name_; }
