@@ -90,6 +90,21 @@ public:
         return found;
     }
 
+    // Returns true if the WQL query matches at least one instance.
+    bool exists(const std::wstring& wql) {
+        if (!pSvc_) return false;
+        IEnumWbemClassObject* pEnumerator = nullptr;
+        HRESULT hres = pSvc_->ExecQuery(bstr_t("WQL"), bstr_t(wql.c_str()),
+                                        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
+        if (FAILED(hres) || !pEnumerator) return false;
+        IWbemClassObject* pclsObj = nullptr;
+        ULONG uReturn = 0;
+        bool found = (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0);
+        if (pclsObj) pclsObj->Release();
+        pEnumerator->Release();
+        return found;
+    }
+
 private:
     IWbemLocator* pLoc_ = nullptr;
     IWbemServices* pSvc_ = nullptr;
@@ -100,13 +115,28 @@ std::string GetNPUDriverVersion() {
     if (!wmi.is_valid()) return "";
 
     std::string version;
-    // Query for "NPU Compute Accelerator Device"
-    // Need to escape special characters in query if any, but specific name is simple
-    std::wstring query = L"SELECT DriverVersion FROM Win32_PnPSignedDriver WHERE DeviceName LIKE '%NPU Compute Accelerator Device%'";
-    
+    // Match both NPU device names: XDNA2 reports "NPU Compute Accelerator Device",
+    // Medusa (XDNA3) reports "AMD XDNA(TM) NPU".
+    std::wstring query =
+        L"SELECT DriverVersion FROM Win32_PnPSignedDriver "
+        L"WHERE DeviceName LIKE '%NPU Compute Accelerator Device%' "
+        L"OR DeviceName LIKE '%XDNA%'";
+
     if (wmi.query(query, version)) {
         return version;
     }
+    return "";
+}
+
+// Identify the NPU architecture by AMD PCI device id:
+//   XDNA2        -> VEN_1022&DEV_17F0
+//   Medusa/XDNA3 -> VEN_1022&DEV_17F1
+std::string GetNPUArchitecture() {
+    WMIConnection wmi;
+    if (!wmi.is_valid()) return "";
+    const std::wstring base = L"SELECT PNPDeviceID FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%VEN_1022&";
+    if (wmi.exists(base + L"DEV_17F1%'")) return "Medusa (XDNA3)";
+    if (wmi.exists(base + L"DEV_17F0%'")) return "XDNA2";
     return "";
 }
 
@@ -118,6 +148,10 @@ void OpenBrowser(const std::string& url) {
 
 // Non-Windows platforms: NPU driver check not supported
 std::string GetNPUDriverVersion() {
+    return "";
+}
+
+std::string GetNPUArchitecture() {
     return "";
 }
 
@@ -157,13 +191,18 @@ bool IsVersionLessThan(const std::string& v1, const std::string& v2) {
 }
 
 bool CheckNPUDriverVersion() {
+    std::string arch = GetNPUArchitecture();
+    if (!arch.empty()) {
+        std::cout << "[Server] NPU Architecture: " << arch << std::endl;
+    }
+
     std::string version = GetNPUDriverVersion();
-    
+
     if (version.empty()) {
         std::cout << "[Server] NPU Driver Version: Unknown (Could not detect)" << std::endl;
         return true; // Assume OK if we can't detect, to not block users with weird setups
     }
-    
+
     std::cout << "[Server] NPU Driver Version: " << version << std::endl;
     
     if (IsVersionLessThan(version, RYZENAI_SERVER_MINIMUM_DRIVER)) {

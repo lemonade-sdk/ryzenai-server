@@ -1,8 +1,74 @@
 #include "ryzenai/types.h"
 #include <sstream>
 #include <iostream>
+#include <stdexcept>
 
 namespace ryzenai {
+
+// Base64 decode — handles data URIs like "data:image/jpeg;base64,<data>"
+static std::vector<uint8_t> decode_base64(const std::string& input) {
+    static const std::string chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<uint8_t> out;
+    int val = 0, bits = -8;
+    for (unsigned char c : input) {
+        if (c == '=') break;
+        auto pos = chars.find(c);
+        if (pos == std::string::npos) continue;
+        val = (val << 6) + static_cast<int>(pos);
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return out;
+}
+
+// Parse a single content-part array from an OpenAI multimodal message.
+// Fills message.content (text), message.images, and message.audios.
+static void parse_content_array(const json& content_arr, ChatMessage& message) {
+    for (const auto& part : content_arr) {
+        std::string type = part.value("type", "");
+        if (type == "text") {
+            if (!message.content.empty()) message.content += "\n";
+            message.content += part.value("text", "");
+        } else if (type == "image_url") {
+            if (!part.contains("image_url")) continue;
+            std::string url = part["image_url"].value("url", "");
+            // Expect "data:<mime>;base64,<data>"
+            const std::string prefix = "data:";
+            const std::string b64marker = ";base64,";
+            if (url.rfind(prefix, 0) == 0) {
+                auto semi = url.find(b64marker);
+                if (semi != std::string::npos) {
+                    std::string mime = url.substr(prefix.size(), semi - prefix.size());
+                    std::string b64data = url.substr(semi + b64marker.size());
+                    ImageContent img;
+                    img.mime_type = mime;
+                    img.data = decode_base64(b64data);
+                    message.images.push_back(std::move(img));
+                }
+            }
+        } else if (type == "input_audio") {
+            // {"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}
+            if (!part.contains("input_audio") || !part["input_audio"].is_object()) continue;
+            const auto& ia = part["input_audio"];
+            std::string b64data = ia.value("data", "");
+            // Strip a data-URI prefix if a client sends one.
+            const std::string b64marker = ";base64,";
+            auto semi = b64data.find(b64marker);
+            if (b64data.rfind("data:", 0) == 0 && semi != std::string::npos) {
+                b64data = b64data.substr(semi + b64marker.size());
+            }
+            if (b64data.empty()) continue;
+            AudioContent aud;
+            aud.format = ia.value("format", "wav");
+            aud.data = decode_base64(b64data);
+            message.audios.push_back(std::move(aud));
+        }
+    }
+}
 
 CompletionRequest CompletionRequest::fromJSON(const json& j) {
     CompletionRequest req;
@@ -68,7 +134,14 @@ ChatCompletionRequest ChatCompletionRequest::fromJSON(const json& j) {
         for (const auto& msg : j["messages"]) {
             ChatMessage message;
             message.role = msg.value("role", "user");
-            message.content = msg.value("content", "");
+            if (msg.contains("content")) {
+                if (msg["content"].is_string()) {
+                    message.content = msg["content"].get<std::string>();
+                } else if (msg["content"].is_array()) {
+                    // OpenAI vision format: content is an array of text/image_url parts
+                    parse_content_array(msg["content"], message);
+                }
+            }
             req.messages.push_back(message);
         }
     }

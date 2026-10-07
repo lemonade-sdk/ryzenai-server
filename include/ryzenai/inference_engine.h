@@ -12,6 +12,9 @@ struct OgaTokenizer;
 struct OgaGeneratorParams;
 struct OgaGenerator;
 struct OgaSequences;
+struct OgaMultiModalProcessor;
+struct OgaImages;
+struct OgaAudios;
 
 namespace ryzenai {
 
@@ -28,17 +31,38 @@ public:
     InferenceEngine(const std::string& model_path);
     ~InferenceEngine();
     
-    // Synchronous completion
-    // Returns generated text. If out_timing is provided, stores timing data.
+    // Synchronous completion (text only)
     std::string complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing = nullptr);
-    
-    // Streaming completion
-    void streamComplete(const std::string& prompt, 
+
+    // Synchronous multimodal completion (images and/or audios).
+    std::string completeWithMedia(const std::string& prompt,
+                                  const std::vector<ImageContent>& images,
+                                  const std::vector<AudioContent>& audios,
+                                  const GenerationParams& params,
+                                  CompletionTimingData* out_timing = nullptr);
+
+    // Streaming completion (text only)
+    void streamComplete(const std::string& prompt,
                        const GenerationParams& params,
                        StreamCallback callback);
-    
+
+    // Streaming multimodal completion (images and/or audios).
+    void streamCompleteWithMedia(const std::string& prompt,
+                                 const std::vector<ImageContent>& images,
+                                 const std::vector<AudioContent>& audios,
+                                 const GenerationParams& params,
+                                 StreamCallback callback);
+
     // Apply chat template to messages
     std::string applyChatTemplate(const std::string& messages_json, const std::string& tools_json = "");
+
+    // True if the loaded model supports image/audio inputs
+    bool isMultimodal() const { return is_multimodal_; }
+
+    // Build the multimodal prompt via the model's chat template, injecting
+    // num_images image parts and num_audios audio parts.
+    std::string buildMultimodalPrompt(const std::string& text, size_t num_images,
+                                      size_t num_audios = 0) const;
     
     // Getters
     std::string getModelName() const { return model_name_; }
@@ -64,6 +88,9 @@ private:
     
     std::unique_ptr<OgaModel> model_;
     std::unique_ptr<OgaTokenizer> tokenizer_;
+    std::unique_ptr<OgaMultiModalProcessor> processor_;  // non-null for multimodal models
+    bool is_multimodal_ = false;
+    std::string model_type_;  // e.g. "phi4mm", "phi3v", "videochat_flash_qwen", "gemma"
     
     std::string model_path_;
     std::string model_name_;

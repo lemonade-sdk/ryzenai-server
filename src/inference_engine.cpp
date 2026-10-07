@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
+#include <cstring>
 
 namespace ryzenai {
 
@@ -364,13 +365,36 @@ void InferenceEngine::setupExecutionProvider() {
 void InferenceEngine::loadModel() {
     try {
         std::cout << "[InferenceEngine] Loading ONNX model from: " << model_path_ << std::endl;
-        
-        // Create model using factory method
+
         model_ = OgaModel::Create(model_path_.c_str());
-        
-        // Create tokenizer using factory method
+
+        // A "vision" block or image_token_id in genai_config.json marks the model
+        // as multimodal — the same signal OGA uses. This beats a model-type allowlist
+        // (e.g. gemma-4 reports type "gemma4", which no fixed list would anticipate).
+        std::string config_path = model_path_ + "/genai_config.json";
+        if (fs::exists(config_path)) {
+            try {
+                std::ifstream f(config_path);
+                json cfg = json::parse(f);
+                if (cfg.contains("model") && cfg["model"].is_object()) {
+                    const auto& m = cfg["model"];
+                    if (m.contains("type") && m["type"].is_string()) {
+                        model_type_ = m["type"].get<std::string>();
+                    }
+                    if (m.contains("vision") || m.contains("image_token_id")) {
+                        is_multimodal_ = true;
+                    }
+                }
+            } catch (...) {}
+        }
+
+        if (is_multimodal_) {
+            std::cout << "[InferenceEngine] Multimodal model detected (type=" << model_type_
+                      << "), creating MultiModalProcessor" << std::endl;
+            processor_ = OgaMultiModalProcessor::Create(*model_);
+        }
         tokenizer_ = OgaTokenizer::Create(*model_);
-        
+
         // Load chat template from tokenizer_config.json
         std::string tokenizer_config_path = model_path_ + "/tokenizer_config.json";
         if (fs::exists(tokenizer_config_path)) {
@@ -385,11 +409,219 @@ void InferenceEngine::loadModel() {
                 std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
             }
         }
-        
+
         std::cout << "[InferenceEngine] Model and tokenizer loaded successfully" << std::endl;
-        
+
     } catch (const std::exception& e) {
         throw std::runtime_error("Failed to load model: " + std::string(e.what()));
+    }
+}
+
+std::string InferenceEngine::buildMultimodalPrompt(const std::string& text, size_t num_images,
+                                                    size_t num_audios) const {
+    // Render the model's own chat template with structured content parts
+    // [image..., audio..., text] so each model emits its own media tokens
+    // (e.g. gemma-4's <|image|>/<|audio|> and <|turn> structure).
+    if (!chat_template_.empty()) {
+        try {
+            json content = json::array();
+            for (size_t i = 0; i < num_images; ++i) content.push_back({{"type", "image"}});
+            for (size_t i = 0; i < num_audios; ++i) content.push_back({{"type", "audio"}});
+            content.push_back({{"type", "text"}, {"text", text}});
+            json messages = json::array();
+            messages.push_back({{"role", "user"}, {"content", content}});
+
+            auto result = tokenizer_->ApplyChatTemplate(
+                chat_template_.c_str(), messages.dump().c_str(),
+                nullptr, /*add_generation_prompt=*/true);
+            std::string rendered(result);
+            if (!rendered.empty()) {
+                std::cout << "[InferenceEngine] Built multimodal prompt via chat template ("
+                          << num_images << " image(s), " << num_audios << " audio(s))" << std::endl;
+                return rendered;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[WARNING] Chat-template prompt failed: " << e.what()
+                      << " — falling back to model-type heuristics" << std::endl;
+        }
+    }
+
+    // Fallbacks for models whose template doesn't render content parts.
+    if (model_type_ == "phi4mm" || model_type_ == "phi3v") {
+        std::string prompt = "<|user|>\n";
+        for (size_t i = 0; i < num_images; ++i) {
+            prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
+        }
+        for (size_t i = 0; i < num_audios; ++i) {
+            prompt += "<|audio_" + std::to_string(i + 1) + "|>\n";
+        }
+        prompt += text + "<|end|>\n<|assistant|>\n";
+        return prompt;
+    } else if (model_type_ == "videochat_flash_qwen") {
+        std::string vision_blocks;
+        for (size_t i = 0; i < num_images; ++i) {
+            vision_blocks += "<|vision_start|><|vision_end|>";
+        }
+        return "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+               "<|im_start|>user\n" + vision_blocks + text + "<|im_end|>\n"
+               "<|im_start|>assistant\n";
+    }
+    // Last-resort generic placeholder.
+    return "<image>\n" + text;
+}
+
+// Collect {data,size} pointers from a media vector. The returned ptr/size
+// vectors reference the caller's buffers, which must outlive the OgaX::Load call.
+template <typename Media>
+static void collect_buffers(const std::vector<Media>& items,
+                            std::vector<const void*>& ptrs,
+                            std::vector<size_t>& sizes) {
+    ptrs.reserve(items.size());
+    sizes.reserve(items.size());
+    for (const auto& it : items) {
+        ptrs.push_back(it.data.data());
+        sizes.push_back(it.data.size());
+    }
+}
+
+// Process prompt + optional images/audios. The holders keep the OGA media
+// objects alive for the duration of the ProcessImagesAndAudios call.
+static std::unique_ptr<OgaNamedTensors> process_media(
+    OgaMultiModalProcessor& processor, const std::string& prompt,
+    const std::vector<ImageContent>& images, const std::vector<AudioContent>& audios,
+    std::unique_ptr<OgaImages>& images_holder, std::unique_ptr<OgaAudios>& audios_holder) {
+
+    std::vector<const void*> ptrs; std::vector<size_t> sizes;
+    if (!images.empty()) {
+        collect_buffers(images, ptrs, sizes);
+        images_holder = OgaImages::Load(ptrs.data(), sizes.data(), images.size());
+    }
+    if (!audios.empty()) {
+        ptrs.clear(); sizes.clear();
+        collect_buffers(audios, ptrs, sizes);
+        audios_holder = OgaAudios::Load(ptrs.data(), sizes.data(), audios.size());
+    }
+    // Null args are skipped, so this covers images-only, audio-only, and both.
+    return processor.ProcessImagesAndAudios(prompt.c_str(),
+                                            images_holder.get(), audios_holder.get());
+}
+
+std::string InferenceEngine::completeWithMedia(const std::string& prompt,
+                                               const std::vector<ImageContent>& images,
+                                               const std::vector<AudioContent>& audios,
+                                               const GenerationParams& params,
+                                               CompletionTimingData* out_timing) {
+    std::lock_guard<std::mutex> lock(inference_mutex_);
+
+    if (!is_multimodal_ || !processor_) {
+        throw std::runtime_error("Model is not multimodal — use complete() instead");
+    }
+    if (images.empty() && audios.empty()) {
+        throw std::runtime_error("completeWithMedia called with no media");
+    }
+
+    try {
+        auto start_time = std::chrono::high_resolution_clock::now();
+        auto first_token_time = start_time;
+        bool first_token_received = false;
+
+        std::unique_ptr<OgaImages> images_holder;
+        std::unique_ptr<OgaAudios> audios_holder;
+        auto named_tensors = process_media(*processor_, prompt, images, audios,
+                                           images_holder, audios_holder);
+
+        auto gen_params = OgaGeneratorParams::Create(*model_);
+        gen_params->SetSearchOption("max_length", params.max_length + 1024);
+        gen_params->SetSearchOption("temperature", params.temperature);
+        gen_params->SetSearchOption("top_p", params.top_p);
+        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
+        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
+        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
+
+        auto generator = OgaGenerator::Create(*model_, *gen_params);
+        generator->SetInputs(*named_tensors);
+
+        auto stream = OgaTokenizerStream::Create(*processor_);
+        std::string result;
+        int token_count = 0;
+
+        while (!generator->IsDone() && token_count < params.max_length) {
+            generator->GenerateNextToken();
+            if (!first_token_received) {
+                first_token_time = std::chrono::high_resolution_clock::now();
+                first_token_received = true;
+            }
+            const int32_t* tokens = generator->GetSequenceData(0);
+            size_t num = generator->GetSequenceCount(0);
+            const char* decoded = stream->Decode(tokens[num - 1]);
+            if (decoded) result += decoded;
+            ++token_count;
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        if (out_timing) {
+            out_timing->token_count = token_count;
+            out_timing->ttft_seconds = std::chrono::duration<double>(first_token_time - start_time).count();
+            out_timing->total_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+            double decode_s = std::chrono::duration<double>(end_time - first_token_time).count();
+            out_timing->tps = (token_count > 1 && decode_s > 0) ? (token_count - 1) / decode_s : 0.0;
+        }
+
+        return result;
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Multimodal inference failed: " + std::string(e.what()));
+    }
+}
+
+void InferenceEngine::streamCompleteWithMedia(const std::string& prompt,
+                                              const std::vector<ImageContent>& images,
+                                              const std::vector<AudioContent>& audios,
+                                              const GenerationParams& params,
+                                              StreamCallback callback) {
+    std::lock_guard<std::mutex> lock(inference_mutex_);
+
+    if (!is_multimodal_ || !processor_) {
+        throw std::runtime_error("Model is not multimodal — use streamComplete() instead");
+    }
+    if (images.empty() && audios.empty()) {
+        throw std::runtime_error("streamCompleteWithMedia called with no media");
+    }
+
+    try {
+        std::unique_ptr<OgaImages> images_holder;
+        std::unique_ptr<OgaAudios> audios_holder;
+        auto named_tensors = process_media(*processor_, prompt, images, audios,
+                                           images_holder, audios_holder);
+
+        auto gen_params = OgaGeneratorParams::Create(*model_);
+        gen_params->SetSearchOption("max_length", params.max_length + 1024);
+        gen_params->SetSearchOption("temperature", params.temperature);
+        gen_params->SetSearchOption("top_p", params.top_p);
+        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
+        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
+        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
+
+        auto generator = OgaGenerator::Create(*model_, *gen_params);
+        generator->SetInputs(*named_tensors);
+
+        auto stream = OgaTokenizerStream::Create(*processor_);
+        int token_count = 0;
+
+        while (!generator->IsDone() && token_count < params.max_length) {
+            generator->GenerateNextToken();
+            const int32_t* tokens = generator->GetSequenceData(0);
+            size_t num = generator->GetSequenceCount(0);
+            const char* decoded = stream->Decode(tokens[num - 1]);
+            bool is_final = generator->IsDone();
+            if (decoded && decoded[0] != '\0') {
+                if (!callback(std::string(decoded), is_final)) break;
+            }
+            ++token_count;
+        }
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Multimodal streaming inference failed: " + std::string(e.what()));
     }
 }
 

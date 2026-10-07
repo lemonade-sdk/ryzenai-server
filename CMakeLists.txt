@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(ryzenai-server VERSION 1.7.0 LANGUAGES CXX)
+
+option(MEDUSA_BUILD "Build against Medusa (AIE4/M0.9.2) SDK instead of RyzenAI 1.7.0" OFF)
+
+if(MEDUSA_BUILD)
+    project(ryzenai-server VERSION 0.9.2 LANGUAGES CXX)
+else()
+    project(ryzenai-server VERSION 1.7.0 LANGUAGES CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +34,13 @@ if(DEFINED ENV{RYZENAI_INSTALL_PATH})
     endif()
     # Force override cached value if environment variable is set
     set(OGA_ROOT "$ENV{RYZENAI_INSTALL_PATH}" CACHE PATH "Path to Ryzen AI installation" FORCE)
+elseif(MEDUSA_BUILD)
+    if(WIN32)
+        set(OGA_ROOT_DEFAULT "C:/medusa-sdk/win64-winml")
+    else()
+        set(OGA_ROOT_DEFAULT "/opt/ryzenai/medusa")
+    endif()
+    set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Medusa SDK installation")
 elseif(WIN32)
     set(OGA_ROOT_DEFAULT "C:/Program Files/RyzenAI/1.7.0")
     set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
@@ -36,15 +50,39 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 if(NOT EXISTS ${OGA_ROOT})
-    message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.7.0 or set OGA_ROOT")
+    if(MEDUSA_BUILD)
+        message(FATAL_ERROR "Medusa SDK not found at ${OGA_ROOT}. Extract win64-winml.zip there or set OGA_ROOT / RYZENAI_INSTALL_PATH")
+    else()
+        message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.7.0 or set OGA_ROOT")
+    endif()
 endif()
 
-message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
+if(MEDUSA_BUILD)
+    message(STATUS "Using Medusa (AIE4/M0.9.2) SDK from: ${OGA_ROOT}")
+else()
+    message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
+endif()
 
 # Find ONNX Runtime GenAI library
-# - Windows installer: ${OGA_ROOT}/LLM/{lib,include}
-# - Linux installer:   ${OGA_ROOT}/deployment/lib (no headers shipped)
-if(WIN32)
+# - RyzenAI 1.7.0 Windows: ${OGA_ROOT}/LLM/{lib,include}
+# - Medusa win64-winml Windows: DLLs at ${OGA_ROOT}/, headers at ${OGA_ROOT}/voe/include/onnxruntime/core/session/
+#   The Medusa zip ships no onnxruntime-genai.lib; generate an import lib at configure time.
+# - Linux installer: ${OGA_ROOT}/deployment/lib (no headers shipped)
+if(WIN32 AND MEDUSA_BUILD)
+    # Import lib pre-generated from Medusa onnxruntime-genai.dll using dumpbin + lib.exe.
+    # Place onnxruntime-genai.lib in the build directory before configuring.
+    set(OGA_GENAI_LIB "${CMAKE_BINARY_DIR}/onnxruntime-genai.lib")
+    if(NOT EXISTS ${OGA_GENAI_LIB})
+        message(FATAL_ERROR "onnxruntime-genai.lib not found at ${OGA_GENAI_LIB}. "
+            "Generate it from the Medusa DLL:\n"
+            "  dumpbin /exports onnxruntime-genai.dll > oga.def  (edit to LIBRARY+EXPORTS format)\n"
+            "  lib /def:oga.def /out:onnxruntime-genai.lib /machine:x64\n"
+            "Then copy onnxruntime-genai.lib into your build directory.")
+    endif()
+    set(OGA_LIB "${OGA_GENAI_LIB}")
+    # OGA headers matching the Medusa OGA 0.16 DLL — vendored in the repo root
+    set(OGA_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}")
+elseif(WIN32)
     find_library(OGA_LIB
         NAMES onnxruntime-genai
         PATHS ${OGA_ROOT}/LLM/lib
@@ -153,27 +191,49 @@ if(WIN32)
     target_compile_definitions(ryzenai-server PRIVATE _WIN32_WINNT=0x0A00)
     target_link_libraries(ryzenai-server PRIVATE ws2_32 wbemuuid ole32 oleaut32 shell32)
     
-    # Copy required DLLs to output directory (they're in deployment folder)
-    set(REQUIRED_DLLS
-        "${OGA_ROOT}/deployment/onnxruntime-genai.dll"
-        "${OGA_ROOT}/deployment/onnxruntime.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_providers_shared.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_providers_vitisai.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_providers_ryzenai.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_vitisai_ep.dll"
-        "${OGA_ROOT}/deployment/onnxruntime_vitis_ai_custom_ops.dll"
-        "${OGA_ROOT}/deployment/onnx_custom_ops.dll"
-        "${OGA_ROOT}/deployment/dyn_dispatch_core.dll"
-        "${OGA_ROOT}/deployment/DirectML.dll"
-        "${OGA_ROOT}/deployment/D3D12Core.dll"
-        "${OGA_ROOT}/deployment/flexmlrt.dll"
-        "${OGA_ROOT}/deployment/cert_dtrace.dll"
-        "${OGA_ROOT}/deployment/zlib.dll"
-        "${OGA_ROOT}/deployment/zstd.dll"
-        "${OGA_ROOT}/deployment/ryzenai_onnx_utils.dll"
-        "${OGA_ROOT}/deployment/ryzen_mm.dll"
-        "${OGA_ROOT}/deployment/aiecompiler_client.dll"
-    )
+    # Copy required DLLs to output directory
+    if(MEDUSA_BUILD)
+        # Medusa (AIE4 / win64-winml) DLLs — all at OGA_ROOT root (no deployment/ subdir)
+        set(REQUIRED_DLLS
+            "${OGA_ROOT}/onnxruntime-genai.dll"
+            "${OGA_ROOT}/onnxruntime.dll"
+            "${OGA_ROOT}/onnxruntime_providers_shared.dll"
+            "${OGA_ROOT}/onnxruntime_providers_vitisai.dll"
+            "${OGA_ROOT}/onnxruntime_providers_ryzenai.dll"
+            "${OGA_ROOT}/onnxruntime_vitisai_ep.dll"
+            "${OGA_ROOT}/onnxruntime_vitis_ai_custom_ops.dll"
+            "${OGA_ROOT}/dyn_dispatch_core.dll"
+            "${OGA_ROOT}/dyn_bins.dll"
+            "${OGA_ROOT}/me_aie4.dll"
+            "${OGA_ROOT}/DirectML.dll"
+            "${OGA_ROOT}/ryzen_mm.dll"
+            "${OGA_ROOT}/waic_inmem.dll"
+            "${OGA_ROOT}/waic_mlir.dll"
+            "${OGA_ROOT}/z.dll"
+        )
+    else()
+        # RyzenAI 1.7.0 DLLs — under deployment/
+        set(REQUIRED_DLLS
+            "${OGA_ROOT}/deployment/onnxruntime-genai.dll"
+            "${OGA_ROOT}/deployment/onnxruntime.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_providers_shared.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_providers_vitisai.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_providers_ryzenai.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_vitisai_ep.dll"
+            "${OGA_ROOT}/deployment/onnxruntime_vitis_ai_custom_ops.dll"
+            "${OGA_ROOT}/deployment/onnx_custom_ops.dll"
+            "${OGA_ROOT}/deployment/dyn_dispatch_core.dll"
+            "${OGA_ROOT}/deployment/DirectML.dll"
+            "${OGA_ROOT}/deployment/D3D12Core.dll"
+            "${OGA_ROOT}/deployment/flexmlrt.dll"
+            "${OGA_ROOT}/deployment/cert_dtrace.dll"
+            "${OGA_ROOT}/deployment/zlib.dll"
+            "${OGA_ROOT}/deployment/zstd.dll"
+            "${OGA_ROOT}/deployment/ryzenai_onnx_utils.dll"
+            "${OGA_ROOT}/deployment/ryzen_mm.dll"
+            "${OGA_ROOT}/deployment/aiecompiler_client.dll"
+        )
+    endif()
     
     # Set console subsystem explicitly
     set_target_properties(ryzenai-server PROPERTIES
@@ -193,6 +253,20 @@ if(WIN32)
         endif()
     endforeach()
     
+    # Medusa requires vaip_config.json at runtime alongside the binary
+    if(MEDUSA_BUILD)
+        if(EXISTS "${OGA_ROOT}/vaip_config.json")
+            add_custom_command(TARGET ryzenai-server POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${OGA_ROOT}/vaip_config.json"
+                $<TARGET_FILE_DIR:ryzenai-server>/vaip_config.json
+                COMMENT "Copying vaip_config.json (Medusa AIE4 EP config)"
+            )
+        else()
+            message(WARNING "vaip_config.json not found at ${OGA_ROOT}/vaip_config.json")
+        endif()
+    endif()
+
     # Copy AMD_LICENSE to output directory
     add_custom_command(TARGET ryzenai-server POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -247,9 +321,14 @@ install(TARGETS ryzenai-server
 
 # Print build information
 message(STATUS "==========================================================")
-message(STATUS "Ryzen AI LLM Server Configuration:")
+if(MEDUSA_BUILD)
+    message(STATUS "Ryzen AI LLM Server Configuration (Medusa/AIE4 build):")
+else()
+    message(STATUS "Ryzen AI LLM Server Configuration:")
+endif()
 message(STATUS "  Build type:        ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Ryzen AI path:     ${OGA_ROOT}")
+message(STATUS "  SDK path:          ${OGA_ROOT}")
+message(STATUS "  Medusa build:      ${MEDUSA_BUILD}")
 message(STATUS "  Output directory:  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "==========================================================")
 
