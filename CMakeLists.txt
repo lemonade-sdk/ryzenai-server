@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ryzenai-server VERSION 1.7.0 LANGUAGES CXX)
+project(ryzenai-server VERSION 1.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,15 +28,15 @@ if(DEFINED ENV{RYZENAI_INSTALL_PATH})
     # Force override cached value if environment variable is set
     set(OGA_ROOT "$ENV{RYZENAI_INSTALL_PATH}" CACHE PATH "Path to Ryzen AI installation" FORCE)
 elseif(WIN32)
-    set(OGA_ROOT_DEFAULT "C:/Program Files/RyzenAI/1.7.0")
+    set(OGA_ROOT_DEFAULT "C:/Program Files/RyzenAI/1.9.0")
     set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
 elseif(UNIX AND NOT APPLE)
-    set(OGA_ROOT_DEFAULT "/opt/ryzenai/1.7.0")
+    set(OGA_ROOT_DEFAULT "/opt/ryzenai/1.9.0")
     set(OGA_ROOT "${OGA_ROOT_DEFAULT}" CACHE PATH "Path to Ryzen AI installation")
 endif()
 
 if(NOT EXISTS ${OGA_ROOT})
-    message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.7.0 or set OGA_ROOT")
+    message(FATAL_ERROR "Ryzen AI not found at ${OGA_ROOT}. Please install Ryzen AI 1.9.0 or set OGA_ROOT")
 endif()
 
 message(STATUS "Using Ryzen AI from: ${OGA_ROOT}")
@@ -90,27 +90,35 @@ message(STATUS "ONNX Runtime GenAI include: ${OGA_INCLUDE}")
 # Download header-only libraries if not present
 include(FetchContent)
 
+# Download a header unless a non-empty copy is already present. A failed
+# earlier download leaves a 0-byte file, which EXISTS alone would accept and
+# the build would then fail with confusing "unknown type" errors.
+function(fetch_header URL DEST)
+    if(EXISTS "${DEST}")
+        file(SIZE "${DEST}" _size)
+        if(_size GREATER 0)
+            return()
+        endif()
+    endif()
+    message(STATUS "Downloading ${URL}...")
+    file(DOWNLOAD "${URL}" "${DEST}" SHOW_PROGRESS STATUS _status)
+    list(GET _status 0 _code)
+    file(SIZE "${DEST}" _size)
+    if(NOT _code EQUAL 0 OR _size EQUAL 0)
+        file(REMOVE "${DEST}")
+        message(FATAL_ERROR "Failed to download ${URL}: ${_status}")
+    endif()
+endfunction()
+
 # cpp-httplib
 set(HTTPLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-httplib")
-if(NOT EXISTS "${HTTPLIB_DIR}/httplib.h")
-    message(STATUS "Downloading cpp-httplib...")
-    file(DOWNLOAD
-        "https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.26.0/httplib.h"
-        "${HTTPLIB_DIR}/httplib.h"
-        SHOW_PROGRESS
-    )
-endif()
+fetch_header("https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.26.0/httplib.h"
+             "${HTTPLIB_DIR}/httplib.h")
 
 # nlohmann/json
 set(JSON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/json")
-if(NOT EXISTS "${JSON_DIR}/json.hpp")
-    message(STATUS "Downloading nlohmann/json...")
-    file(DOWNLOAD
-        "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
-        "${JSON_DIR}/json.hpp"
-        SHOW_PROGRESS
-    )
-endif()
+fetch_header("https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
+             "${JSON_DIR}/json.hpp")
 
 # Source files
 set(SOURCES
@@ -154,6 +162,10 @@ if(WIN32)
     target_link_libraries(ryzenai-server PRIVATE ws2_32 wbemuuid ole32 oleaut32 shell32)
     
     # Copy required DLLs to output directory (they're in deployment folder)
+    # DLL list matches the RAI 1.9.0 Windows deployment folder.
+    # Dropped vs 1.7: onnx_custom_ops, flexmlrt, cert_dtrace, zlib, zstd,
+    #                 ryzenai_onnx_utils, aiecompiler_client (not shipped in 1.9)
+    # New in 1.9:     dyn_bins (~1.35 GB), vitis-ai-runtime
     set(REQUIRED_DLLS
         "${OGA_ROOT}/deployment/onnxruntime-genai.dll"
         "${OGA_ROOT}/deployment/onnxruntime.dll"
@@ -162,17 +174,12 @@ if(WIN32)
         "${OGA_ROOT}/deployment/onnxruntime_providers_ryzenai.dll"
         "${OGA_ROOT}/deployment/onnxruntime_vitisai_ep.dll"
         "${OGA_ROOT}/deployment/onnxruntime_vitis_ai_custom_ops.dll"
-        "${OGA_ROOT}/deployment/onnx_custom_ops.dll"
         "${OGA_ROOT}/deployment/dyn_dispatch_core.dll"
+        "${OGA_ROOT}/deployment/dyn_bins.dll"
         "${OGA_ROOT}/deployment/DirectML.dll"
         "${OGA_ROOT}/deployment/D3D12Core.dll"
-        "${OGA_ROOT}/deployment/flexmlrt.dll"
-        "${OGA_ROOT}/deployment/cert_dtrace.dll"
-        "${OGA_ROOT}/deployment/zlib.dll"
-        "${OGA_ROOT}/deployment/zstd.dll"
-        "${OGA_ROOT}/deployment/ryzenai_onnx_utils.dll"
         "${OGA_ROOT}/deployment/ryzen_mm.dll"
-        "${OGA_ROOT}/deployment/aiecompiler_client.dll"
+        "${OGA_ROOT}/deployment/vitis-ai-runtime.dll"
     )
     
     # Set console subsystem explicitly

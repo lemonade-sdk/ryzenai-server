@@ -24,8 +24,8 @@ This server enables running Large Language Models on AMD Ryzen AI 300-series pro
 - Windows 11 (64-bit)
 - Visual Studio 2022
 - CMake 3.20 or higher
-- **Ryzen AI Software 1.7.0**
-  - Default installation path: `C:\Program Files\RyzenAI\1.7.0`
+- **Ryzen AI Software 1.9.0**
+  - Default installation path: `C:\Program Files\RyzenAI\1.9.0`
   - Download from: https://ryzenai.docs.amd.com
 
 **Hardware Requirements:**
@@ -56,8 +56,8 @@ cmake --build . --config Release
 - Ubuntu 22.04+ or equivalent Linux distribution
 - GCC 9+ or Clang 10+
 - CMake 3.20 or higher
-- **Ryzen AI Software 1.7.0 for Linux**
-  - Default installation path: `/opt/ryzenai/1.7.0`
+- **Ryzen AI Software 1.9.0 for Linux**
+  - Default installation path: `/opt/ryzenai/1.9.0`
   - Download from: https://ryzenai.docs.amd.com
 
 ```bash
@@ -100,12 +100,12 @@ If Ryzen AI is installed in a custom location, you can specify it using either a
 
 ```bash
 # Linux/macOS
-export RYZENAI_INSTALL_PATH=/custom/path/ryzenai/1.7.0
+export RYZENAI_INSTALL_PATH=/custom/path/ryzenai/1.9.0
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build .
 
 # Windows (PowerShell)
-$env:RYZENAI_INSTALL_PATH="C:\custom\path\RyzenAI\1.7.0"
+$env:RYZENAI_INSTALL_PATH="C:\custom\path\RyzenAI\1.9.0"
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
@@ -114,16 +114,16 @@ cmake --build . --config Release
 
 ```bash
 # Linux
-cmake .. -DCMAKE_BUILD_TYPE=Release -DOGA_ROOT=/custom/path/ryzenai/1.7.0
+cmake .. -DCMAKE_BUILD_TYPE=Release -DOGA_ROOT=/custom/path/ryzenai/1.9.0
 
 # Windows
-cmake .. -G "Visual Studio 17 2022" -A x64 -DOGA_ROOT="C:\custom\path\RyzenAI\1.7.0"
+cmake .. -G "Visual Studio 17 2022" -A x64 -DOGA_ROOT="C:\custom\path\RyzenAI\1.9.0"
 ```
 
 **Priority Order:**
 1. `RYZENAI_INSTALL_PATH` environment variable (highest priority)
 2. `-DOGA_ROOT` CMake cache variable
-3. Platform-specific defaults (`C:/Program Files/RyzenAI/1.7.0` on Windows, `/opt/ryzenai/1.7.0` on Linux)
+3. Platform-specific defaults (`C:/Program Files/RyzenAI/1.9.0` on Windows, `/opt/ryzenai/1.9.0` on Linux)
 
 ## Code Structure
 
@@ -225,7 +225,7 @@ ryzenai-server.exe -m C:\path\to\onnx\model --verbose
 ./ryzenai-server -m /opt/models/phi-3-mini-4k-instruct-onnx
 
 # With custom Ryzen AI installation path
-export RYZENAI_INSTALL_PATH=/custom/ryzenai/1.7.0
+export RYZENAI_INSTALL_PATH=/custom/ryzenai/1.9.0
 ./ryzenai-server -m /opt/models/phi-3-mini-4k-instruct-onnx
 
 # Custom port
@@ -283,7 +283,7 @@ Returns server status and Ryzen AI-specific information:
   "model": "phi-3-mini-4k-instruct",
   "execution_mode": "hybrid",
   "max_prompt_length": 4096,
-  "ryzenai_version": "1.7.0"
+  "ryzenai_version": "1.9.0"
 }
 ```
 
@@ -362,7 +362,7 @@ print(response.choices[0].message.content)
 
 **Check:**
 1. Model path is correct and contains required ONNX files
-2. Ryzen AI 1.7.0 is installed at the correct path
+2. Ryzen AI 1.9.0 is installed at the correct path
 3. NPU drivers are up to date (Windows Update)
 4. Model is compatible with your Ryzen AI version
 
@@ -371,7 +371,7 @@ print(response.choices[0].message.content)
 All required DLLs should be automatically copied during build. If you get DLL errors:
 1. Verify Ryzen AI is installed correctly
 2. Rebuild with `cmake --build . --config Release`
-3. Manually copy DLLs from `C:\Program Files\RyzenAI\1.7.0\deployment\` to the executable directory
+3. Manually copy DLLs from `C:\Program Files\RyzenAI\1.9.0\deployment\` to the executable directory
 
 ### Port Already in Use
 

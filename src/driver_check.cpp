@@ -19,7 +19,7 @@
 
 namespace ryzenai {
 
-const std::string RYZENAI_SERVER_MINIMUM_DRIVER = "32.0.203.280";
+const std::string RYZENAI_SERVER_MINIMUM_DRIVER = "32.0.201.448";
 const std::string DRIVER_INSTALL_URL = "https://lemonade-server.ai/driver_install";
 
 #ifdef _WIN32

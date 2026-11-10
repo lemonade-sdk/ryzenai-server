@@ -251,17 +251,17 @@ std::string InferenceEngine::detectRyzenAIVersion() {
 
     // Priority 3: Check platform-specific default paths
 #ifdef _WIN32
-    std::string ryzenai_path_17 = "C:/Program Files/RyzenAI/1.7.0";
+    std::string ryzenai_path_19 = "C:/Program Files/RyzenAI/1.9.0";
 #else
-    std::string ryzenai_path_17 = "/opt/ryzenai/1.7.0";
+    std::string ryzenai_path_19 = "/opt/ryzenai/1.9.0";
 #endif
 
-    if (fs::exists(ryzenai_path_17)) {
-        return "1.7.0";
+    if (fs::exists(ryzenai_path_19)) {
+        return "1.9.0";
     }
 
     // Default fallback
-    return "1.7.0";
+    return "1.9.0";
 }
 
 std::string InferenceEngine::detectExecutionMode() {
