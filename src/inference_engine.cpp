@@ -1,10 +1,13 @@
 #include "ryzenai/inference_engine.h"
 #include <ort_genai.h>
 #include <ort_genai_c.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
+#include <stdexcept>
 #include <cstdlib>
 #include <thread>
 #include <chrono>
@@ -109,24 +112,36 @@ std::string InferenceEngine::applyChatTemplate(const std::string& messages_json,
                          (chat_template_.find("<|im_start|>") != std::string::npos ||
                           chat_template_.find("\\u003c|im_start|\\u003e") != std::string::npos);
     
-    // If tools are provided, always use OGA's built-in template (it handles tools properly)
-    if (!tools_json.empty()) {
+    // Content-part arrays carry image/audio placeholders that only the model's own
+    // template knows how to render into media tokens.
+    bool has_content_parts = false;
+    for (const auto& msg : messages) {
+        if (msg.contains("content") && msg["content"].is_array()) {
+            has_content_parts = true;
+            break;
+        }
+    }
+
+    // Tools and content parts need the full template, so use OGA's renderer
+    if (!tools_json.empty() || has_content_parts) {
         try {
             const char* template_str = chat_template_.empty() ? nullptr : chat_template_.c_str();
-            const char* tools_str = tools_json.c_str();
-            
+            const char* tools_str = tools_json.empty() ? nullptr : tools_json.c_str();
+
             auto result = tokenizer_->ApplyChatTemplate(
                 template_str,
                 messages_json.c_str(),
                 tools_str,
                 true
             );
-            
-            std::cout << "[InferenceEngine] Applied chat template with tools" << std::endl;
+
+            std::cout << "[InferenceEngine] Applied chat template"
+                      << (tools_str ? " with tools" : "")
+                      << (has_content_parts ? " with media parts" : "") << std::endl;
             return std::string(result);
-            
+
         } catch (const std::exception& e) {
-            std::cerr << "[ERROR] Failed to apply chat template with tools: " << e.what() << std::endl;
+            std::cerr << "[ERROR] Failed to apply chat template: " << e.what() << std::endl;
             throw;
         }
     } else if (is_qwen_style) {
@@ -334,11 +349,31 @@ void InferenceEngine::loadRaiConfig() {
             std::ifstream file(rai_config_path);
             json config = json::parse(file);
             
-            if (config.contains("max_prompt_length") && 
-                config["max_prompt_length"].contains(ryzenai_version_)) {
-                max_prompt_length_ = config["max_prompt_length"][ryzenai_version_];
-                std::cout << "[InferenceEngine] Loaded max_prompt_length from rai_config.json: " 
-                         << max_prompt_length_ << std::endl;
+            // Checkpoints don't always list the running SDK (the 1.9.0 ones stop at
+            // 1.7.1), so take the newest entry that isn't newer than it.
+            auto parse_version = [](const std::string& v) {
+                std::vector<int> parts;
+                std::stringstream ss(v);
+                for (std::string p; std::getline(ss, p, '.');) {
+                    parts.push_back(std::atoi(p.c_str()));
+                }
+                return parts;
+            };
+            const auto current = parse_version(ryzenai_version_);
+            std::vector<int> best_version;
+            std::string best_key;
+            const json limits = config.value("max_prompt_length", json::object());
+            for (const auto& [key, value] : limits.items()) {
+                auto version = parse_version(key);
+                if (value.is_number_integer() && version <= current && version >= best_version) {
+                    best_version = version;
+                    best_key = key;
+                }
+            }
+            if (!best_key.empty()) {
+                max_prompt_length_ = config["max_prompt_length"][best_key];
+                std::cout << "[InferenceEngine] Loaded max_prompt_length from rai_config.json: "
+                          << max_prompt_length_ << " (entry " << best_key << ")" << std::endl;
             }
         } catch (const std::exception& e) {
             std::cerr << "[WARNING] Failed to parse rai_config.json: " << e.what() << std::endl;
@@ -365,9 +400,24 @@ void InferenceEngine::loadModel() {
     try {
         std::cout << "[InferenceEngine] Loading ONNX model from: " << model_path_ << std::endl;
         
-        // Create model using factory method
         model_ = OgaModel::Create(model_path_.c_str());
-        
+
+        // Same signal OGA uses: a vision/speech encoder section in genai_config.json.
+        std::string genai_config_path = model_path_ + "/genai_config.json";
+        if (fs::exists(genai_config_path)) {
+            std::ifstream file(genai_config_path);
+            json config = json::parse(file);
+            const json& model_cfg = config.value("model", json::object());
+            if (model_cfg.contains("vision") || model_cfg.contains("speech")) {
+                processor_ = OgaMultiModalProcessor::Create(*model_);
+                std::cout << "[InferenceEngine] Multimodal model ("
+                          << (model_cfg.contains("vision") ? "vision" : "")
+                          << (model_cfg.contains("vision") && model_cfg.contains("speech") ? "+" : "")
+                          << (model_cfg.contains("speech") ? "audio" : "")
+                          << "), created MultiModalProcessor" << std::endl;
+            }
+        }
+
         // Create tokenizer using factory method
         tokenizer_ = OgaTokenizer::Create(*model_);
         
@@ -385,7 +435,16 @@ void InferenceEngine::loadModel() {
                 std::cerr << "[WARNING] Failed to load chat template: " << e.what() << std::endl;
             }
         }
-        
+
+        // Newer HF exports (including the RAI 1.9 checkpoints) keep the template
+        // only in chat_template.jinja; without it tools never reach the prompt.
+        std::string jinja_path = model_path_ + "/chat_template.jinja";
+        if (chat_template_.empty() && fs::exists(jinja_path)) {
+            std::ifstream file(jinja_path, std::ios::binary);
+            chat_template_.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            std::cout << "[InferenceEngine] Loaded chat template from chat_template.jinja" << std::endl;
+        }
+
         std::cout << "[InferenceEngine] Model and tokenizer loaded successfully" << std::endl;
         
     } catch (const std::exception& e) {
@@ -411,86 +470,111 @@ std::vector<int32_t> InferenceEngine::truncatePrompt(const std::vector<int32_t>&
     );
 }
 
-std::string InferenceEngine::complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing) {
+InferenceEngine::Generation InferenceEngine::startGeneration(const std::string& prompt,
+                                                             const GenerationParams& params,
+                                                             const MediaInputs& media) {
+    Generation gen;
+    std::vector<int32_t> input_ids;
+
+    if (media.empty()) {
+        auto sequences = OgaSequences::Create();
+        tokenizer_->Encode(prompt.c_str(), *sequences);
+        const int32_t* input_ids_ptr = sequences->SequenceData(0);
+        input_ids.assign(input_ids_ptr, input_ids_ptr + sequences->SequenceCount(0));
+        input_ids = truncatePrompt(input_ids);
+        gen.prompt_tokens = input_ids.size();
+    } else {
+        if (!processor_) {
+            throw std::invalid_argument("Model '" + model_name_ + "' does not accept image or audio input");
+        }
+        std::vector<const void*> image_data, audio_data;
+        std::vector<size_t> image_sizes, audio_sizes;
+        for (const auto& image : media.images) {
+            image_data.push_back(image.data());
+            image_sizes.push_back(image.size());
+        }
+        for (const auto& audio : media.audios) {
+            audio_data.push_back(audio.data());
+            audio_sizes.push_back(audio.size());
+        }
+        auto images = media.images.empty() ? nullptr
+            : OgaImages::Load(image_data.data(), image_sizes.data(), image_data.size());
+        auto audios = media.audios.empty() ? nullptr
+            : OgaAudios::Load(audio_data.data(), audio_sizes.data(), audio_data.size());
+        gen.inputs = processor_->ProcessImagesAndAudios(prompt.c_str(), images.get(), audios.get());
+
+        // input_ids shape is [1, seq_len]; index 1 is the token count.
+        auto shape = gen.inputs->Get("input_ids")->Shape();
+        gen.prompt_tokens = static_cast<size_t>(shape.at(1));
+        if (gen.prompt_tokens > static_cast<size_t>(max_prompt_length_)) {
+            throw std::invalid_argument("Prompt with media is " + std::to_string(gen.prompt_tokens) +
+                                        " tokens, over this model's limit of " +
+                                        std::to_string(max_prompt_length_));
+        }
+        std::cout << "[InferenceEngine] Processed " << media.images.size() << " image(s), "
+                  << media.audios.size() << " audio clip(s) -> " << gen.prompt_tokens
+                  << " prompt tokens" << std::endl;
+    }
+
+    // params.max_length is max_new_tokens; OGA's max_length counts the prompt too
+    auto gen_params = OgaGeneratorParams::Create(*model_);
+    gen_params->SetSearchOption("max_length", static_cast<double>(gen.prompt_tokens + params.max_length));
+    gen_params->SetSearchOption("temperature", params.temperature);
+    gen_params->SetSearchOption("top_p", params.top_p);
+    gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
+    gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
+    gen_params->SetSearchOptionBool("do_sample", params.do_sample);
+    // Lock random_seed to 1 for deterministic behavior (matching Python reference)
+    gen_params->SetSearchOption("random_seed", 1.0);
+
+    gen.generator = OgaGenerator::Create(*model_, *gen_params);
+    if (gen.inputs) {
+        gen.generator->SetInputs(*gen.inputs);
+    } else {
+        gen.generator->AppendTokens(input_ids.data(), input_ids.size());
+    }
+    return gen;
+}
+
+std::string InferenceEngine::complete(const std::string& prompt, const GenerationParams& params,
+                                      CompletionTimingData* out_timing, const MediaInputs& media) {
     std::lock_guard<std::mutex> lock(inference_mutex_);
-    
+
     try {
-        // Start timing
         auto start_time = std::chrono::high_resolution_clock::now();
         auto first_token_time = start_time;
         bool first_token_received = false;
-        
-        // Tokenize input
-        auto sequences = OgaSequences::Create();
-        tokenizer_->Encode(prompt.c_str(), *sequences);
-        
-        // Get token IDs and apply truncation
-        const int32_t* input_ids_ptr = sequences->SequenceData(0);
-        size_t input_ids_count = sequences->SequenceCount(0);
-        std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
-        input_ids = truncatePrompt(input_ids);
-        
-        // Create generator params
-        auto gen_params = OgaGeneratorParams::Create(*model_);
-        // max_length should be prompt_length + max_new_tokens
-        // params.max_length is max_new_tokens from the caller
-        gen_params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + params.max_length);
-        gen_params->SetSearchOption("temperature", params.temperature);
-        gen_params->SetSearchOption("top_p", params.top_p);
-        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
-        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
-        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-        // Lock random_seed to 1 for deterministic behavior (matching Python reference)
-        gen_params->SetSearchOption("random_seed", 1.0);
-        
-        // Generate
-        auto generator = OgaGenerator::Create(*model_, *gen_params);
-        
-        // Set input tokens
-        generator->AppendTokens(input_ids.data(), input_ids.size());
-        
-        std::cout << "[InferenceEngine] Generating tokens..." << std::endl;
-        
+
+        auto gen = startGeneration(prompt, params, media);
+        auto& generator = gen.generator;
+
+        int generated_token_count = 0;
         while (!generator->IsDone()) {
             generator->GenerateNextToken();
-            
-            // Track time to first token
+            ++generated_token_count;
             if (!first_token_received) {
                 first_token_time = std::chrono::high_resolution_clock::now();
                 first_token_received = true;
             }
         }
-        
-        // End timing
+
         auto end_time = std::chrono::high_resolution_clock::now();
-        
-        // Get the output
+
         const int32_t* output_ptr = generator->GetSequenceData(0);
         size_t output_count = generator->GetSequenceCount(0);
-        
-        // Calculate actual generated token count
-        int generated_token_count = (output_count > input_ids.size()) 
-            ? static_cast<int>(output_count - input_ids.size()) 
-            : 0;
-        
-        // Calculate timing metrics
+
         auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
         auto ttft_duration = std::chrono::duration_cast<std::chrono::milliseconds>(first_token_time - start_time);
         double ttft_seconds = ttft_duration.count() / 1000.0;
         double total_time_ms = static_cast<double>(total_duration.count());
-        
-        // Calculate TPS: tokens generated after the first token, divided by time after first token
+        // TPS excludes the first token (prefill-dominated); single-token falls back to total time.
         double decode_time_seconds = (total_duration.count() - ttft_duration.count()) / 1000.0;
         double tps = 0.0;
         if (generated_token_count > 1 && decode_time_seconds > 0) {
-            // TPS = (tokens - 1) / decode_time (exclude first token from TPS calculation)
             tps = (generated_token_count - 1) / decode_time_seconds;
         } else if (generated_token_count == 1 && total_time_ms > 0) {
-            // Only one token generated - use total time
             tps = 1.0 / (total_time_ms / 1000.0);
         }
-        
-        // Return timing data if requested
         if (out_timing != nullptr) {
             out_timing->token_count = generated_token_count;
             out_timing->ttft_seconds = ttft_seconds;
@@ -498,22 +582,18 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
             out_timing->total_time_ms = total_time_ms;
         }
         
-        // Decode only the newly generated tokens (skip the input prompt)
         std::string result;
-        if (output_count > input_ids.size()) {
-            auto decoded = tokenizer_->Decode(output_ptr + input_ids.size(), output_count - input_ids.size());
+        size_t new_tokens = std::min(static_cast<size_t>(generated_token_count), output_count);
+        if (new_tokens > 0) {
+            auto decoded = tokenizer_->Decode(output_ptr + output_count - new_tokens, new_tokens);
             result = std::string(decoded);
-        } else {
-            // No new tokens generated
-            result = "";
         }
         
-        // Apply stop sequences - remove stop sequence and everything after it
         for (const auto& stop_seq : params.stop_sequences) {
             size_t pos = result.find(stop_seq);
             if (pos != std::string::npos) {
                 result = result.substr(0, pos);
-                break;  // Stop at first match
+                break;
             }
         }
         
@@ -521,51 +601,26 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
                   << total_time_ms << "ms (TTFT: " << (ttft_seconds * 1000) << "ms, TPS: " << tps << ")" << std::endl;
         
         return result;
-        
+
+    } catch (const std::invalid_argument&) {
+        throw;
     } catch (const std::exception& e) {
         throw std::runtime_error("Inference failed: " + std::string(e.what()));
     }
 }
 
-void InferenceEngine::streamComplete(const std::string& prompt, 
+void InferenceEngine::streamComplete(const std::string& prompt,
                                      const GenerationParams& params,
-                                     StreamCallback callback) {
+                                     StreamCallback callback,
+                                     const MediaInputs& media) {
     std::lock_guard<std::mutex> lock(inference_mutex_);
-    
+
     try {
-        // Tokenize input
-        auto sequences = OgaSequences::Create();
-        tokenizer_->Encode(prompt.c_str(), *sequences);
-        
-        // Get token IDs and apply truncation
-        const int32_t* input_ids_ptr = sequences->SequenceData(0);
-        size_t input_ids_count = sequences->SequenceCount(0);
-        std::vector<int32_t> input_ids(input_ids_ptr, input_ids_ptr + input_ids_count);
-        input_ids = truncatePrompt(input_ids);
-        
-        // Create generator params
-        auto gen_params = OgaGeneratorParams::Create(*model_);
-        // max_length should be prompt_length + max_new_tokens
-        // params.max_length is max_new_tokens from the caller
-        int total_max_length = static_cast<int>(input_ids.size()) + params.max_length;
-        std::cout << "[InferenceEngine::streamComplete] prompt_length=" << input_ids.size() 
-                  << ", max_new_tokens=" << params.max_length 
-                  << ", total_max_length=" << total_max_length << std::endl;
-        gen_params->SetSearchOption("max_length", total_max_length);
-        gen_params->SetSearchOption("temperature", params.temperature);
-        gen_params->SetSearchOption("top_p", params.top_p);
-        gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
-        gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
-        gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-        // Lock random_seed to 1 for deterministic behavior (matching Python reference)
-        gen_params->SetSearchOption("random_seed", 1.0);
-        
-        // Generate
-        auto generator = OgaGenerator::Create(*model_, *gen_params);
-        
-        // Set input tokens
-        generator->AppendTokens(input_ids.data(), input_ids.size());
-        
+        auto gen = startGeneration(prompt, params, media);
+        auto& generator = gen.generator;
+        std::cout << "[InferenceEngine::streamComplete] prompt_length=" << gen.prompt_tokens
+                  << ", max_new_tokens=" << params.max_length << std::endl;
+
         std::cout << "[InferenceEngine] Generating tokens (streaming)..." << std::endl;
         
         // Use OgaTokenizerStream for efficient incremental token decoding
@@ -624,7 +679,9 @@ void InferenceEngine::streamComplete(const std::string& prompt,
         }
         
         std::cout << "[InferenceEngine] Generated " << token_count << " tokens (streaming)" << std::endl;
-        
+
+    } catch (const std::invalid_argument&) {
+        throw;
     } catch (const std::exception& e) {
         throw std::runtime_error("Streaming inference failed: " + std::string(e.what()));
     }

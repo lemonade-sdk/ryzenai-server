@@ -3,6 +3,7 @@
 #include "ryzenai/reasoning.h"
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <chrono>
 #include <iomanip>
 #include <thread>
@@ -529,19 +530,33 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             return;
         }
         
-        // Convert messages to JSON array for chat template
         json messages_array = json::array();
+        MediaInputs media;
         for (const auto& msg : chat_req.messages) {
-            messages_array.push_back({
-                {"role", msg.role},
-                {"content", msg.content}
-            });
+            if (msg.media.empty()) {
+                messages_array.push_back({{"role", msg.role}, {"content", msg.content}});
+                continue;
+            }
+            messages_array.push_back({{"role", msg.role}, {"content", msg.parts}});
+            media.images.insert(media.images.end(), msg.media.images.begin(), msg.media.images.end());
+            media.audios.insert(media.audios.end(), msg.media.audios.begin(), msg.media.audios.end());
         }
-        
+
+        if (!media.empty() && !inference_engine_->isMultimodal()) {
+            res.status = 400;
+            res.set_content(createErrorResponse(
+                "Model '" + model_id_ + "' does not accept image or audio input",
+                "invalid_request").dump(), "application/json");
+            return;
+        }
+
         // Apply the model's chat template (with tools if provided)
         std::string tools_json = chat_req.tools.empty() ? "" : chat_req.tools.dump();
-        
+
         std::cout << "[Server] Chat completion request (stream=" << chat_req.stream;
+        if (!media.empty()) {
+            std::cout << ", images=" << media.images.size() << ", audios=" << media.audios.size();
+        }
         if (!tools_json.empty()) {
             std::cout << ", with " << chat_req.tools.size() << " tools";
             std::cout << ")" << std::endl;
@@ -574,7 +589,7 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [this, prompt, params, model_id, has_tools, prompt_tokens](size_t offset, httplib::DataSink& sink) {
+                [this, prompt, params, model_id, has_tools, prompt_tokens, media](size_t offset, httplib::DataSink& sink) {
                     if (offset > 0) return false; // Only run once
                     
                     try {
@@ -703,13 +718,14 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                                 
                                 token_count++;
                                 return true; // Continue generation
-                            }
+                            },
+                            media
                         );
-                        
+
                         // After generation completes, do a final flush to catch any remaining buffered content
                         // This handles the case where the last few tokens didn't trigger processing due to buffer size
                         auto [final_reasoning, final_content] = reasoning_parser.flush();
-                        
+
                         // Helper function to escape JSON strings (reused from above)
                         auto escapeJson = [](const std::string& str) -> std::string {
                             std::string escaped = str;
@@ -848,8 +864,8 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             );
             
             CompletionTimingData timing;
-            std::string output = inference_engine_->complete(prompt, params, &timing);
-            
+            std::string output = inference_engine_->complete(prompt, params, &timing, media);
+
             // Parse reasoning content from output
             auto reasoning_result = parseReasoningContent(output);
             std::string content = reasoning_result.regular_content;
@@ -924,12 +940,15 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             std::cout << "[Server] [OK] Chat completion generated (" << timing.total_time_ms << "ms)" << std::endl;
             res.set_content(response.dump(), "application/json");
         }
-        
+
     } catch (const json::exception& e) {
         res.status = 400;
-        res.set_content(createErrorResponse("Invalid JSON: " + std::string(e.what()), 
-                                          "parse_error").dump(), 
+        res.set_content(createErrorResponse("Invalid JSON: " + std::string(e.what()),
+                                          "parse_error").dump(),
                        "application/json");
+    } catch (const std::invalid_argument& e) {
+        res.status = 400;
+        res.set_content(createErrorResponse(e.what(), "invalid_request").dump(), "application/json");
     } catch (const std::exception& e) {
         res.status = 500;
         res.set_content(createErrorResponse(e.what(), "internal_error").dump(), 

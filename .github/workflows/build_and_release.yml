@@ -133,83 +133,33 @@ jobs:
           python -m pip install -r test/requirements.txt
           Write-Host "Test dependencies installed!" -ForegroundColor Green
 
-      - name: Test all modes
+      - name: Report NPU driver
         shell: PowerShell
         run: |
-          $ErrorActionPreference = "Stop"
-          
-          # Set HF_HOME to local directory
+          Get-CimInstance Win32_PnPSignedDriver |
+              Where-Object { $_.DeviceName -match 'NPU|IPU' } |
+              Format-Table DeviceName, DriverVersion -AutoSize
+
+      - name: Test model profiles
+        shell: PowerShell
+        run: |
+          # Each profile is one 1.9.0 NPU checkpoint; test_server.py downloads it
+          # into HF_HOME and skips tests for features the model lacks.
           $env:HF_HOME = "${{ github.workspace }}/hf_home"
-          
-          if (-not (Test-Path $env:HF_HOME)) {
-              New-Item -ItemType Directory -Path $env:HF_HOME -Force | Out-Null
-          }
-          
-          # Model mapping based on mode
-          $modelMap = @{
-              "npu" = "amd/Llama-3.2-1B-Instruct_rai_1.9.0_npu"
-              "hybrid" = "amd/Qwen2.5-0.5B-Instruct_rai_1.8.0_hybrid"  # no 1.9 hybrid checkpoints on HF; newest is 1.8.0
-              "cpu" = "amd/Qwen2.5-0.5B-Instruct-quantized_int4-float16-cpu-onnx"
-          }
-          
-          $modes = @("cpu", "npu", "hybrid")
+          $profiles = @("text", "tools", "gemma4-e2b", "qwen3-vl")
           $failed = @()
-          
-          foreach ($mode in $modes) {
-              $modelName = $modelMap[$mode]
-              $logDir = "${{ github.workspace }}/test_logs"
-              
-              Write-Host "`n============================================================" -ForegroundColor Cyan
-              Write-Host "  Testing mode: $mode ($modelName)" -ForegroundColor Cyan
-              Write-Host "============================================================`n" -ForegroundColor Cyan
-              
-              # Download the model
-              Write-Host "Downloading model..." -ForegroundColor Cyan
-              python -c @"
-          import os
-          os.environ['HF_HOME'] = r'${{ github.workspace }}/hf_home'
-          from huggingface_hub import snapshot_download
-          model_name = '$modelName'
-          print(f'Downloading {model_name}...')
-          local_path = snapshot_download(repo_id=model_name, local_dir=None)
-          print(f'Model downloaded to: {local_path}')
-          "@
-              
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Host "ERROR: Failed to download model for $mode!" -ForegroundColor Red
-                  $failed += $mode
-                  continue
-              }
-              
-              # Run tests
-              Write-Host "Running tests for $mode..." -ForegroundColor Cyan
-              python test/test_server.py --mode $mode --server-exe build/bin/Release/ryzenai-server.exe --log-dir $logDir
-              
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Host "ERROR: Tests failed for mode $mode!" -ForegroundColor Red
-                  $failed += $mode
-              } else {
-                  Write-Host "All tests passed for mode: $mode" -ForegroundColor Green
-              }
+
+          foreach ($profile in $profiles) {
+              Write-Host "`n=== Testing profile: $profile ===`n" -ForegroundColor Cyan
+              python test/test_server.py --profile $profile --server-exe build/bin/Release/ryzenai-server.exe --log-dir "${{ github.workspace }}/test_logs"
+              if ($LASTEXITCODE -ne 0) { $failed += $profile }
           }
-          
-          # Summary
-          Write-Host "`n============================================================" -ForegroundColor Cyan
-          Write-Host "  Test Summary" -ForegroundColor Cyan
-          Write-Host "============================================================" -ForegroundColor Cyan
-          foreach ($mode in $modes) {
-              if ($failed -contains $mode) {
-                  Write-Host "  $mode : FAILED" -ForegroundColor Red
-              } else {
-                  Write-Host "  $mode : PASSED" -ForegroundColor Green
-              }
-          }
-          Write-Host "============================================================`n" -ForegroundColor Cyan
-          
+
           if ($failed.Count -gt 0) {
-              Write-Host "ERROR: $($failed.Count) mode(s) failed: $($failed -join ', ')" -ForegroundColor Red
+              Write-Host "ERROR: profile(s) failed: $($failed -join ', ')" -ForegroundColor Red
               exit 1
           }
+          Write-Host "All profiles passed: $($profiles -join ', ')" -ForegroundColor Green
 
       - name: Upload server logs on failure
         if: failure()

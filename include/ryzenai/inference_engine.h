@@ -12,6 +12,8 @@ struct OgaTokenizer;
 struct OgaGeneratorParams;
 struct OgaGenerator;
 struct OgaSequences;
+struct OgaMultiModalProcessor;
+struct OgaNamedTensors;
 
 namespace ryzenai {
 
@@ -28,18 +30,19 @@ public:
     InferenceEngine(const std::string& model_path);
     ~InferenceEngine();
     
-    // Synchronous completion
-    // Returns generated text. If out_timing is provided, stores timing data.
-    std::string complete(const std::string& prompt, const GenerationParams& params, CompletionTimingData* out_timing = nullptr);
-    
-    // Streaming completion
-    void streamComplete(const std::string& prompt, 
+    std::string complete(const std::string& prompt, const GenerationParams& params,
+                         CompletionTimingData* out_timing = nullptr,
+                         const MediaInputs& media = {});
+
+    void streamComplete(const std::string& prompt,
                        const GenerationParams& params,
-                       StreamCallback callback);
-    
-    // Apply chat template to messages
+                       StreamCallback callback,
+                       const MediaInputs& media = {});
+
     std::string applyChatTemplate(const std::string& messages_json, const std::string& tools_json = "");
-    
+
+    bool isMultimodal() const { return processor_ != nullptr; }
+
     // Getters
     std::string getModelName() const { return model_name_; }
     std::string getExecutionMode() const { return execution_mode_; }
@@ -53,6 +56,15 @@ public:
     int countTokens(const std::string& text);
     
 private:
+    // inputs must outlive generator (OGA reads inputs lazily during generation).
+    struct Generation {
+        std::unique_ptr<OgaNamedTensors> inputs;
+        std::unique_ptr<OgaGenerator> generator;
+        size_t prompt_tokens = 0;
+    };
+    Generation startGeneration(const std::string& prompt, const GenerationParams& params,
+                               const MediaInputs& media);
+
     void loadModel();
     void setupExecutionProvider();
     void loadRaiConfig();
@@ -64,7 +76,8 @@ private:
     
     std::unique_ptr<OgaModel> model_;
     std::unique_ptr<OgaTokenizer> tokenizer_;
-    
+    std::unique_ptr<OgaMultiModalProcessor> processor_;  // set only for multimodal models
+
     std::string model_path_;
     std::string model_name_;
     std::string execution_mode_;  // "npu", "hybrid", or "cpu"

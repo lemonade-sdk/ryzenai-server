@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <json.hpp>
@@ -18,10 +19,19 @@ struct CommandLineArgs {
     bool verbose = false;             // --verbose
 };
 
-// Chat message structure
+// Decoded image/audio payloads, in the order their placeholders appear in the prompt
+struct MediaInputs {
+    std::vector<std::vector<uint8_t>> images;
+    std::vector<std::vector<uint8_t>> audios;
+
+    bool empty() const { return images.empty() && audios.empty(); }
+};
+
 struct ChatMessage {
-    std::string role;     // "system", "user", "assistant"
+    std::string role;
     std::string content;
+    json parts = json::array();  // content parts when input was an array; empty otherwise
+    MediaInputs media;
 };
 
 // Completion request (OpenAI format)

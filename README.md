@@ -296,6 +296,8 @@ Returns server status and Ryzen AI-specific information:
 
 All endpoints support both streaming and non-streaming modes. The server applies chat templates automatically and extracts tool calls from model output.
 
+Multimodal models (those with a `vision` or `speech` section in `genai_config.json`) accept inline base64 `image_url` and `input_audio` content parts. Remote URLs and media sent to a text-only model return `400`.
+
 ## Testing
 
 ### Quick Test
