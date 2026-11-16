@@ -113,6 +113,30 @@ std::pair<std::vector<ToolCall>, std::string> extractToolCalls(const std::string
         offset += match.position() + match.length();
     }
     
+    // Llama 3.2 tool call format: bare JSON object {"name":"...","parameters":{...}}
+    // No wrapping tags; emitted directly after the assistant header.
+    if (tool_calls.empty()) {
+        // Llama 3.2 format: bare JSON {"name":"...","parameters":{...}}
+        std::regex llama_pattern(
+            "\\{\"name\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"parameters\"\\s*:\\s*(\\{[^{}]*\\})\\s*\\}");
+        search_text = cleaned_text;
+        offset = 0;
+        while (std::regex_search(search_text, match, llama_pattern)) {
+            try {
+                ToolCall tool_call;
+                tool_call.name = match[1].str();
+                tool_call.arguments = json::parse(match[2].str());
+                tool_calls.push_back(tool_call);
+                size_t match_pos = offset + match.position();
+                cleaned_text.erase(match_pos, match.length());
+            } catch (const json::exception& e) {
+                std::cerr << "[WARNING] Failed to parse Llama tool call JSON: " << e.what() << std::endl;
+            }
+            search_text = match.suffix();
+            offset += match.position() + match.length();
+        }
+    }
+
     // Trim whitespace from cleaned text
     size_t start = cleaned_text.find_first_not_of(" \t\n\r");
     size_t end = cleaned_text.find_last_not_of(" \t\n\r");
