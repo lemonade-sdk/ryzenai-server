@@ -584,29 +584,28 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
             std::string model_id = model_id_;
             bool has_tools = !chat_req.tools.empty();
             
-            // Count prompt tokens before streaming
-            int prompt_tokens = inference_engine_->countTokens(prompt);
-            
+            int prompt_tokens = media.empty() ? inference_engine_->countTokens(prompt) : 0;
+
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [this, prompt, params, model_id, has_tools, prompt_tokens, media](size_t offset, httplib::DataSink& sink) {
+                [this, prompt, params, model_id, has_tools, prompt_tokens, media](size_t offset, httplib::DataSink& sink) mutable {
                     if (offset > 0) return false; // Only run once
                     
                     try {
-                        // Track timing for telemetry
                         auto start_time = std::chrono::high_resolution_clock::now();
                         auto first_token_time = start_time;
                         bool first_token_received = false;
                         int token_count = 0;
-                        
+                        size_t prompt_tokens_sz = static_cast<size_t>(prompt_tokens);
+
                         // Accumulate full response for tool call extraction
                         std::string full_response;
-                        
+
                         // Create reasoning parser for streaming
                         ReasoningStreamParser reasoning_parser;
-                        
+
                         // Generate and send tokens in real-time
-                        inference_engine_->streamComplete(prompt, params, 
+                        inference_engine_->streamComplete(prompt, params,
                             [&sink, model_id, &token_count, &full_response, &reasoning_parser, &first_token_received, &first_token_time](const std::string& token, bool is_final) -> bool {
                                 // Track time to first token
                                 if (!first_token_received && !token.empty()) {
@@ -719,8 +718,10 @@ void RyzenAIServer::handleChatCompletions(const httplib::Request& req, httplib::
                                 token_count++;
                                 return true; // Continue generation
                             },
-                            media
+                            media,
+                            media.empty() ? nullptr : &prompt_tokens_sz
                         );
+                        if (!media.empty()) prompt_tokens = static_cast<int>(prompt_tokens_sz);
 
                         // After generation completes, do a final flush to catch any remaining buffered content
                         // This handles the case where the last few tokens didn't trigger processing due to buffer size

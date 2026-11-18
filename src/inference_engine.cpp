@@ -122,6 +122,26 @@ std::string InferenceEngine::applyChatTemplate(const std::string& messages_json,
         }
     }
 
+    // VideoChat-Flash ships a plain-text Qwen2.5 template with no vision token support.
+    // The VideoChatFlashProcessor requires explicit <|vision_start|><|vision_end|> markers
+    // per image, so the prompt must be built manually rather than via ApplyChatTemplate.
+    if (has_content_parts && model_type_ == "videochat_flash_qwen") {
+        std::string vision_blocks, text;
+        for (const auto& msg : messages) {
+            for (const auto& part : msg.value("content", json::array())) {
+                if (part.value("type", "") == "image") vision_blocks += "<|vision_start|><|vision_end|>";
+                if (part.value("type", "") == "text") {
+                    if (!text.empty()) text += "\n";
+                    text += part.value("text", "");
+                }
+            }
+        }
+        std::cout << "[InferenceEngine] Applied VideoChat-Flash prompt format" << std::endl;
+        return "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+               "<|im_start|>user\n" + vision_blocks + text + "<|im_end|>\n"
+               "<|im_start|>assistant\n";
+    }
+
     // Tools and content parts need the full template, so use OGA's renderer
     if (!tools_json.empty() || has_content_parts) {
         try {
@@ -408,12 +428,11 @@ void InferenceEngine::loadModel() {
             std::ifstream file(genai_config_path);
             json config = json::parse(file);
             const json& model_cfg = config.value("model", json::object());
+            if (model_cfg.contains("type") && model_cfg["type"].is_string())
+                model_type_ = model_cfg["type"].get<std::string>();
             if (model_cfg.contains("vision") || model_cfg.contains("speech")) {
                 processor_ = OgaMultiModalProcessor::Create(*model_);
-                std::cout << "[InferenceEngine] Multimodal model ("
-                          << (model_cfg.contains("vision") ? "vision" : "")
-                          << (model_cfg.contains("vision") && model_cfg.contains("speech") ? "+" : "")
-                          << (model_cfg.contains("speech") ? "audio" : "")
+                std::cout << "[InferenceEngine] Multimodal model (type=" << model_type_
                           << "), created MultiModalProcessor" << std::endl;
             }
         }
@@ -511,6 +530,7 @@ InferenceEngine::Generation InferenceEngine::startGeneration(const std::string& 
                                         " tokens, over this model's limit of " +
                                         std::to_string(max_prompt_length_));
         }
+        gen.has_media = true;
         std::cout << "[InferenceEngine] Processed " << media.images.size() << " image(s), "
                   << media.audios.size() << " audio clip(s) -> " << gen.prompt_tokens
                   << " prompt tokens" << std::endl;
@@ -524,8 +544,10 @@ InferenceEngine::Generation InferenceEngine::startGeneration(const std::string& 
     gen_params->SetSearchOption("top_k", static_cast<double>(params.top_k));
     gen_params->SetSearchOption("repetition_penalty", params.repetition_penalty);
     gen_params->SetSearchOptionBool("do_sample", params.do_sample);
-    // Lock random_seed to 1 for deterministic behavior (matching Python reference)
-    gen_params->SetSearchOption("random_seed", 1.0);
+    // Pin seed only when greedy/deterministic so temperature>0 requests vary as expected.
+    if (!params.do_sample || params.temperature == 0.0f) {
+        gen_params->SetSearchOption("random_seed", 1.0);
+    }
 
     gen.generator = OgaGenerator::Create(*model_, *gen_params);
     if (gen.inputs) {
@@ -612,19 +634,24 @@ std::string InferenceEngine::complete(const std::string& prompt, const Generatio
 void InferenceEngine::streamComplete(const std::string& prompt,
                                      const GenerationParams& params,
                                      StreamCallback callback,
-                                     const MediaInputs& media) {
+                                     const MediaInputs& media,
+                                     size_t* out_prompt_tokens) {
     std::lock_guard<std::mutex> lock(inference_mutex_);
 
     try {
         auto gen = startGeneration(prompt, params, media);
         auto& generator = gen.generator;
+        if (out_prompt_tokens) *out_prompt_tokens = gen.prompt_tokens;
         std::cout << "[InferenceEngine::streamComplete] prompt_length=" << gen.prompt_tokens
                   << ", max_new_tokens=" << params.max_length << std::endl;
 
         std::cout << "[InferenceEngine] Generating tokens (streaming)..." << std::endl;
         
-        // Use OgaTokenizerStream for efficient incremental token decoding
-        auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer_);
+        // Multimodal generators must use the processor stream — it suppresses image-pad
+        // sentinel tokens that the plain tokenizer stream would decode as garbage.
+        auto tokenizer_stream = gen.has_media
+            ? OgaTokenizerStream::Create(*processor_)
+            : OgaTokenizerStream::Create(*tokenizer_);
         
         size_t token_count = 0;
         std::string accumulated_output;  // Track full output for stop sequence detection

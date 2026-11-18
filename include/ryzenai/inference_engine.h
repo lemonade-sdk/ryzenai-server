@@ -37,7 +37,8 @@ public:
     void streamComplete(const std::string& prompt,
                        const GenerationParams& params,
                        StreamCallback callback,
-                       const MediaInputs& media = {});
+                       const MediaInputs& media = {},
+                       size_t* out_prompt_tokens = nullptr);
 
     std::string applyChatTemplate(const std::string& messages_json, const std::string& tools_json = "");
 
@@ -61,6 +62,7 @@ private:
         std::unique_ptr<OgaNamedTensors> inputs;
         std::unique_ptr<OgaGenerator> generator;
         size_t prompt_tokens = 0;
+        bool has_media = false;  // true when processor injected image/audio tokens
     };
     Generation startGeneration(const std::string& prompt, const GenerationParams& params,
                                const MediaInputs& media);
@@ -77,6 +79,7 @@ private:
     std::unique_ptr<OgaModel> model_;
     std::unique_ptr<OgaTokenizer> tokenizer_;
     std::unique_ptr<OgaMultiModalProcessor> processor_;  // set only for multimodal models
+    std::string model_type_;  // e.g. "gemma4", "qwen3_vl", "videochat_flash_qwen"
 
     std::string model_path_;
     std::string model_name_;
